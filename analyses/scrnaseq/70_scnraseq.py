@@ -15,6 +15,8 @@
 # %%
 # %load_ext autoreload
 # %autoreload 2
+
+# %%
 import scanpy as sc
 import scvi
 import numpy as np
@@ -26,19 +28,23 @@ sc.set_figure_params(figsize=(5, 5))
 from scanpy_helpers.annotation import AnnotationHelper
 
 # %%
+# set this to the data directory where you extracted the data from zenodo
+data_dir = "/data/projects/2017/Organoids-ICBI/zenodo/scrnaseq/"
+
+# %%
 scvi.settings.seed = 0
 
 # %%
 organoids = ["CRC02", "CRC03", "CRC03_2", "CRC04", "CRC13", "CRC26", "CRC26LM"]
 adatas = {
     organoid: sc.read_h5ad(
-        f"../data/scrnaseq/01_qc_and_filtering/{organoid}/{organoid}.qc.h5ad"
+        f"{data_dir}/01_qc_and_filtering/{organoid}/{organoid}.qc.h5ad"
     )
     for organoid in organoids
 }
 doublets = {
     organoid: pd.read_csv(
-        f"../data/scrnaseq/02_solo/{organoid}/{organoid}.is_doublet.csv",
+        f"{data_dir}/02_solo/{organoid}/{organoid}.is_doublet.csv",
         header=None,
         names=["barcode", "is_doublet"],
     )
@@ -155,13 +161,11 @@ adata_scvi.obsm["X_pca"] = adata[adata_scvi.obs_names, :].obsm["X_pca"]
 adata_scvi.obsm["X_umap_uncorrected"] = adata[adata_scvi.obs_names, :].obsm["X_umap"]
 
 # %%
-# !rm -rvf ../data/scrnaseq/03_scvi
-
-# %%
-# !mkdir -p ../data/scrnaseq/03_scvi
-model.save("../data/scrnaseq/03_scvi/scvi_model")
-model_hvg.save("../data/scrnaseq/03_scvi/scvi_model_hvg")
-adata_scvi.write_h5ad("../data/scrnaseq/03_scvi/adata_integrated.h5ad")
+# save data as input for next notebook
+# # !mkdir -p ../data/scrnaseq/03_scvi
+# model.save("../data/scrnaseq/03_scvi/scvi_model")
+# model_hvg.save("../data/scrnaseq/03_scvi/scvi_model_hvg")
+# adata_scvi.write_h5ad("../data/scrnaseq/03_scvi/adata_integrated.h5ad")
 
 # %%
 sc.pl.umap(adata_scvi, color=["n_genes", "pct_counts_mito", "organoid", "leiden"])

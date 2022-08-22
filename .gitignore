@@ -1,6 +1,8 @@
 #Ipython
 *.ipynb
 .ipynb_checkpoints
+*-requirements.txt
+rik_kernel*.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
