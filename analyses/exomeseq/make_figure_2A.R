@@ -1,3 +1,11 @@
+#!/usr/bin/env Rscript
+#
+# R script to generate Figure 2A from Plattner et al. 2022
+#
+# Author: Dietmar Rieder
+# Date: 2022-08-25
+#
+#
 library(ggplot2)
 library(cowplot)
 require(gridExtra)
