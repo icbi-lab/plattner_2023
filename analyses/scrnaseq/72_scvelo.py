@@ -24,13 +24,17 @@ from matplotlib import rcParams
 rcParams["axes.grid"] = False
 
 # %%
-adata = sc.read_h5ad("../results/71_scrnaseq_de/adata_cell_type.h5ad")
+# set this to the data directory where you extracted the data from zenodo
+data_dir = "/data/projects/2017/Organoids-ICBI/zenodo/scrnaseq/"
+
+# %%
+adata = sc.read_h5ad(f"{data_dir}/04_cell_types/adata_cell_type.h5ad")
 
 
 # %%
 def _read_scvelo(organoid):
     adata = scv.read_loom(
-        f"/data/projects/2017/Organoids-ICBI/scRNAseq_velocyto/organoids-batch1-{organoid}/velocyto/organoids-batch1-{organoid}.loom"
+        f"{data_dir}/05_scvelo/organoids-batch1-{organoid}/velocyto/organoids-batch1-{organoid}.loom"
     )
     adata.obs["organoid"] = organoid
     adata.var_names_make_unique()
@@ -123,28 +127,6 @@ ax = sc.pl.embedding(
     show=False,
     legend_loc="None",
     size=45,
-    alpha=1,
-    add_outline=True,
-    #     outline_color=("grey", "white")
-)
-scv.pl.velocity_embedding_stream(
-    adata_scvelo,
-    basis="umap",
-    color="cell_type",
-    arrow_color="white",
-    legend_loc="right margin",
-    ax=ax,
-    alpha=0,
-)
-
-# %%
-ax = sc.pl.embedding(
-    adata,
-    basis="umap",
-    color="cell_type",
-    show=False,
-    legend_loc="None",
-    size=45,
     alpha=0.3,
 )
 scv.pl.velocity_embedding_stream(
@@ -157,5 +139,3 @@ scv.pl.velocity_embedding_stream(
     alpha=0,
 )
 ax.get_figure().savefig("figures/umap_scvelo_cell_types.svg", dpi=600, bbox_inches="tight")
-
-# %%
