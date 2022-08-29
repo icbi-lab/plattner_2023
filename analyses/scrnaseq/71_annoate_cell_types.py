@@ -28,8 +28,16 @@ import altair as alt
 sc.set_figure_params(figsize=(5, 5))
 
 # %%
-adata = sc.read_h5ad("../data/scrnaseq/03_scvi/adata_integrated.h5ad")
-model_all_genes = scvi.model.SCVI.load("../data/scrnaseq/03_scvi/scvi_model/", adata)
+# set this to the data directory where you extracted the data from zenodo
+data_dir = "/data/projects/2017/Organoids-ICBI/zenodo/scrnaseq/"
+res_dir = "../../results"
+
+# %%
+# !mkdir -p {res_dir}
+
+# %%
+adata = sc.read_h5ad(f"{data_dir}/03_scvi/adata_integrated.h5ad")
+model_all_genes = scvi.model.SCVI.load(f"{data_dir}/03_scvi/scvi_model/", adata)
 
 # %%
 adata.shape
@@ -196,7 +204,7 @@ with plt.rc_context({"figure.figsize": (8, 8)}):
         add_outline=True,
         title="",
         size=30,
-        return_fig = True,
+        return_fig=True,
         legend_loc="on data",
         legend_fontoutline=3,
     )
@@ -213,7 +221,7 @@ with plt.rc_context({"figure.figsize": (8, 8)}):
         add_outline=True,
         title="",
         size=30,
-        return_fig = True
+        return_fig=True,
     )
     fig.savefig(f"figures/umap_uncorrected_cell_type.svg", dpi=600, bbox_inches="tight")
 
@@ -230,7 +238,7 @@ with plt.rc_context({"figure.figsize": (3, 3)}):
         size=5,
         cmap="coolwarm",
         ncols=2,
-        return_fig=True
+        return_fig=True,
     )
     fig.savefig(f"figures/umap_cell_type_markers.svg", dpi=600, bbox_inches="tight")
 
@@ -286,35 +294,6 @@ sc.pl.stacked_violin(
     save="organoid.svg",
 )
 
-# %%
-sc.pl.dotplot(
-    adata,
-    var_names=genes_of_interest,
-    groupby="organoid",
-    swap_axes=True,
-    save="organoid.pdf",
-)
-
-# %%
-sc.pl.stacked_violin(
-    adata,
-    var_names=genes_of_interest,
-    groupby="cell_type",
-    cmap="bwr",
-    swap_axes=True,
-    normalize="var",
-    save="cell_type.pdf",
-)
-
-# %%
-sc.pl.dotplot(
-    adata,
-    var_names=genes_of_interest,
-    groupby="cell_type",
-    swap_axes=True,
-    save="cell_type.pdf",
-)
-
 # %% [markdown]
 # ## scVI DE of cell-types
 
@@ -345,7 +324,7 @@ de.de_res_to_anndata(
 )
 
 # %%
-fig =sc.pl.rank_genes_groups_dotplot(adata, swap_axes=True, n_genes=5, return_fig=True)
+fig = sc.pl.rank_genes_groups_dotplot(adata, swap_axes=True, n_genes=5, return_fig=True)
 fig.savefig("figures/dotplot_cell_type_markers.svg", bbox_inches="tight")
 
 # %%
@@ -357,242 +336,14 @@ sc.pl.dotplot(
 )
 
 # %% [markdown]
-# ## Progeny
-
-# %%
-progeny_model = progeny.load_model(organism="Human", top=1000)
-
-# %%
-progeny.run(
-    adata,  # Data to use
-    progeny_model,  # PROGENy network
-    center=True,  # Center gene expression by mean per cell
-    num_perm=100,  # Simulate m random activities
-    norm=True,  # Normalize by number of edges to correct for large regulons
-    scale=True,  # Scale values per feature so that values can be compared across cells
-    use_raw=True,  # Use raw adata, where we have the lognorm gene expression
-    min_size=5,  # Pathways with less than 5 targets will be ignored
-)
-
-# %%
-ad_progeny = progeny.extract(adata)
-
-# %%
-sc.pl.matrixplot(
-    ad_progeny,
-    var_names=ad_progeny.var.index,
-    groupby="organoid",
-    vmin=-2,
-    vmax=2,
-    cmap="bwr",
-    swap_axes=True,
-    dendrogram=True,
-    save="_progeny_organoids.pdf",
-)
-
-# %%
-sc.pl.matrixplot(
-    ad_progeny,
-    var_names=ad_progeny.var.index,
-    groupby="cell_type",
-    vmin=-2,
-    vmax=2,
-    cmap="bwr",
-    swap_axes=True,
-    dendrogram=True,
-    save="_progeny_cell_types.pdf",
-)
-
-# %%
-for pw in ["MAPK", "PI3K", "WNT"]:
-    tmp_ad = sc.AnnData(
-        pd.DataFrame(ad_progeny[:, pw].X, columns=[pw], index=ad_progeny.obs_names)
-        .assign(
-            cell_type=ad_progeny.obs["cell_type"], organoid=ad_progeny.obs["organoid"]
-        )
-        .pivot_table(values=pw, columns="cell_type", index="organoid", aggfunc=np.mean)
-    )
-    tmp_ad.obs = tmp_ad.obs.reset_index()
-    tmp_ad.obs["organoid"] = pd.Categorical(tmp_ad.obs["organoid"])
-
-    sc.pl.matrixplot(
-        tmp_ad,
-        groupby="organoid",
-        var_names=tmp_ad.var_names,
-        vmin=-2,
-        vmax=2,
-        cmap="bwr",
-        swap_axes=False,
-        dendrogram=False,
-        title=pw,
-        save=f"_progeny_organoid_cell_type_{pw}.pdf",
-    )
-
-# %%
-sc.set_figure_params(figsize=(3, 3))
-sc.pl.umap(
-    ad_progeny, color=ad_progeny.var.index, vmin=-2, vmax=2, cmap="coolwarm", ncols=4
-)
-
-# %%
-sc.set_figure_params(figsize=(3, 3))
-sc.pl.embedding(
-    ad_progeny,
-    basis="X_umap_uncorrected",
-    color=ad_progeny.var.index,
-    vmin=-2,
-    vmax=2,
-    cmap="coolwarm",
-    ncols=4,
-)
-
-# %% [markdown]
-# ### More pathways from Uhlitz et al
-#  * YAP, LGR5, WNT
-#  
-# `Lgr5_ISC-Merlos`, `Wnt targets` and `EYR-Gregorieff` (YAP/EGFR) from `Signatures_Single_cells.xlsx`; 
-#
-# `CORDENONSI_YAP_CONSERVED_SIGNATURE` from YAP_targets.txt. 
-
-# %%
-sig_sheet = pd.read_excel("../tables/signatures/Signatures_Single_cells.xlsx").drop(
-    0, axis="index"
-)
-
-# %%
-signatures = {
-    "YAP": pd.read_csv("../tables/signatures/YAP_targets.txt", skiprows=2, header=None)[
-        0
-    ].tolist(),
-    "LGR5": sig_sheet["Lgr5_ISC-Merlos"].dropna().tolist(),
-    "WNT": [x.upper() for x in sig_sheet["Wnt targets"].dropna().tolist()],
-    "YAP_EGFR": sig_sheet["EYR-Gregorieff"].dropna().tolist(),
-}
-
-# %%
-for key, genes in signatures.items():
-    print(key)
-    sc.tl.score_genes(adata, signatures[key], score_name=key)
-
-# %%
-for pw in signatures:
-    tmp_ad = sc.AnnData(
-        pd.DataFrame(adata.obs[pw], columns=[pw], index=adata.obs_names)
-        .assign(
-            cell_type=adata.obs["cell_type"], organoid=adata.obs["organoid"]
-        )
-        .pivot_table(values=pw, columns="cell_type", index="organoid", aggfunc=np.mean)
-    )
-    tmp_ad.obs = tmp_ad.obs.reset_index()
-    tmp_ad.obs["organoid"] = pd.Categorical(tmp_ad.obs["organoid"])
-
-    sc.pl.matrixplot(
-        tmp_ad,
-        groupby="organoid",
-        var_names=tmp_ad.var_names,
-        vmin=-1,
-        vmax=1,
-        cmap="bwr",
-        swap_axes=False,
-        dendrogram=False,
-        title=pw,
-        save=f"_signatures_organoid_cell_type_{pw}.pdf",
-    )
-
-# %%
-sc.pl.matrixplot(adata, 
-
-# %% [markdown]
-# ## Dorothea
-
-# %%
-regulons = dorothea.load_regulons(
-    [
-        "A",
-        "B",
-    ],  # Which levels of confidence to use (A most confident, E least confident)
-    organism="Human",  # If working with mouse, set to Mouse
-)
-
-# %%
-dorothea.run(
-    adata,  # Data to use
-    regulons,  # Dorothea network
-    center=True,  # Center gene expression by mean per cell
-    num_perm=100,  # Simulate m random activities
-    norm=True,  # Normalize by number of edges to correct for large regulons
-    scale=True,  # Scale values per feature so that values can be compared across cells
-    use_raw=True,  # Use raw adata, where we have the lognorm gene expression
-    min_size=5,  # TF with less than 5 targets will be ignored
-)
-
-# %%
-ad_dorothea = dorothea.extract(adata)
-
-# %%
-sc.pl.matrixplot(
-    ad_dorothea,
-    var_names=ad_dorothea.var.index,
-    groupby="organoid",
-    vmin=-2,
-    vmax=2,
-    cmap="bwr",
-    swap_axes=True,
-    dendrogram=True,
-)
-
-# %%
-sc.pl.matrixplot(
-    ad_dorothea,
-    var_names=ad_dorothea.var.index,
-    groupby="cell_type",
-    vmin=-2,
-    vmax=2,
-    cmap="bwr",
-    swap_axes=True,
-    dendrogram=True,
-)
-
-# %% [markdown]
-# ## Export for cellxgene
-
-# %%
-adata_cellxgene = sc.AnnData(
-    X=sp.hstack(
-        [
-            adata.raw.X,
-            sp.csr_matrix(np.clip(ad_progeny.X, -2, 2)),
-            sp.csr_matrix(np.clip(ad_dorothea.X, -2, 2)),
-        ]
-    ).tocsc(),
-    var=pd.DataFrame(
-        index=np.hstack(
-            [
-                adata.raw.var.index,
-                [f"PW:{x}" for x in ad_progeny.var.index],
-                [f"TF:{x}" for x in ad_dorothea.var.index],
-            ]
-        )
-    ),
-    obs=adata.obs.loc[:, ~adata.obs.columns.str.startswith("_")],
-    obsm={
-        "X_umap": adata.obsm["X_umap"],
-        "X_umap_uncorrected": adata.obsm["X_umap_uncorrected"],
-    },
-)
-
-# %% [markdown]
 # ## Write results
 
 # %%
 del adata.uns["rank_genes_groups"]
 
 # %%
-adata.write_h5ad("../results/71_scrnaseq_de/adata_cell_type.h5ad")
+adata.write_h5ad(f"{res_dir}/adata_cell_type.h5ad")
 
 # %%
-adata_cellxgene.write_h5ad("../results/71_scrnaseq_de/adata_cellxgene.h5ad")
-
-# %%
-de_res.to_csv("../results/71_scrnaseq_de/de_result.csv")
-de_res_cell_type.to_csv("../results/71_scrnaseq_de/de_result_cell_type.csv")
+de_res.to_csv(f"{res_dir}/de_result.csv")
+de_res_cell_type.to_csv(f"{res_dir}/de_result_cell_type.csv")
