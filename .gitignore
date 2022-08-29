@@ -1,5 +1,8 @@
 # Custom
 figures
+analyses/scrnaseq/*.pdf
+analyses/scrnaseq/tmp
+results
 
 #Ipython
 *.ipynb
