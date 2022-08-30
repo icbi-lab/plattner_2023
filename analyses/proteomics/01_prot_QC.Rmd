@@ -1,0 +1,141 @@
+---
+title: "Proteomics - QC"
+author: chripla
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: html_document
+params:
+  inputdir: "../../data/proteomics"
+  resultdir: "../../results"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(readr)
+library(ggbiplot)
+library(tidyr)
+library(dplyr)
+library(tibble)
+library(ComplexHeatmap)
+library(conflicted)
+conflict_prefer("summarise",  "dplyr")
+source('../../lib/global_params.R')
+```
+
+
+### Files:
+1. intensity values for all protein samples including replicates without imputation
+2. intensity values for all protein samples including replicates with imputation
+
+
+```{r, echo=FALSE}
+file.prot <- file.path(params$inputdir, "protein_level_baseline_woImp.txt")
+file.prot.wImp <- file.path(params$inputdir, "protein_level_baseline_wImp.txt")
+
+prot.all <- read_tsv(file.prot)
+prot.all.wImp <- read_tsv(file.prot.wImp)
+
+# rename CRC03_L to CRC03:
+names(prot.all) <- gsub("L_", "", names(prot.all))
+names(prot.all.wImp) <- gsub("L_", "", names(prot.all.wImp))
+
+# reshape data frames:
+prot.all <- prot.all |>
+  column_to_rownames('Protein')
+prot.all <- as.data.frame(prot.all[, startsWith(names(prot.all), "CRC")])
+
+prot.all.wImp <- prot.all.wImp |>
+  column_to_rownames('Protein')
+prot.all.wImp <- as.data.frame(prot.all.wImp[, startsWith(names(prot.all.wImp), "CRC")])
+
+# transform to log2:
+prot.all <- log2(prot.all +1)
+prot.all.wImp <- log2(prot.all.wImp +1)
+
+# set missing values to 'NA'
+prot.all[prot.all==0]<-NA
+```
+
+### Clustered heatmap of protein levels
+
+```{r}
+# scale matrix before plotting heatmap:
+prot.all.scaled <- as.matrix(t(scale(t(prot.all))))
+
+# prepare annotation:
+annot <- t(prot.all.scaled) |> 
+  as_tibble(rownames = "sample") |> 
+  select("sample") |>
+  separate(sample, "organoid", fill="right", extra="drop", sep="_", remove=FALSE)
+
+colors.org <- as.data.frame(colors$organoid) |>
+  rownames_to_column("organoid")
+
+annot <- merge(annot, colors.org) |>
+  column_to_rownames("sample")
+
+cols <- setNames(as.character(annot$`colors$organoid`), annot$organoid)
+ha <- as.data.frame(subset(annot, select=organoid))
+``` 
+
+```{r, fig.width=13, fig.height=12, echo=FALSE}
+Heatmap(prot.all.scaled, 
+        top_annotation = HeatmapAnnotation(df=ha, col=list(organoid=cols)),
+        cluster_rows = FALSE, 
+        show_row_names = FALSE,
+        use_raster = TRUE,
+        column_title = "Proteomics including replicates",
+        heatmap_legend_param = list(title="z-score"),
+        )
+```
+
+### Clustered heatmap of protein levels with imputed values
+```{r, echo = FALSE}
+#scale matrix before plotting heatmap:
+prot.wImp.scaled <- as.matrix(t(scale(t(prot.all.wImp))))
+```
+
+```{r, fig.width=13, fig.height=12, echo=FALSE}
+Heatmap(prot.wImp.scaled, 
+        top_annotation = HeatmapAnnotation(df=ha, col=list(organoid=cols)),
+        cluster_rows = FALSE, 
+        show_row_names = FALSE,
+        use_raster = TRUE,
+        column_title = "Proteomics including replicates (with imputation)",
+        heatmap_legend_param = list(title="z-score"),
+        )
+```
+
+### PCA for all samples, including replicates:
+```{r, fig.width=8, fig.height=6, echo= FALSE}
+prot.pca <- as.data.frame(t(prot.all.wImp))
+prot.pca <- prcomp(prot.pca)
+
+ggbiplot(prot.pca, var.axes = FALSE, groups = annot$organoid) +
+           theme_bw()+
+           scale_color_manual(values=colors$organoid, name="organoid") +
+           ggtitle("PCA - Proteomics (with imputation)")
+```
+
+
+
+### Correlation Heatmaps
+```{r, fig.width=13, fig.height=12, echo=FALSE}
+# Pearson correlation:
+cor.mat <- cor(prot.all, method="pearson", use= "pairwise.complete.obs")
+cor.mat.wImp <- cor(prot.all.wImp, method="pearson")
+
+# plot heatmaps:
+Heatmap(cor.mat,
+        heatmap_legend_param = list(title="Pearson corr."),
+        left_annotation = rowAnnotation(df = ha, col=list(organoid = cols)),
+        top_annotation = HeatmapAnnotation(df = ha, col=list(organoid=cols), show_legend = FALSE),
+        column_title = "Correlation Heatmap Proteomics")
+Heatmap(cor.mat.wImp, 
+        heatmap_legend_param = list(title="Pearson corr."),
+        left_annotation = rowAnnotation(df = ha, col=list(organoid = cols)),
+        top_annotation = HeatmapAnnotation(df = ha, col=list(organoid=cols), show_legend = FALSE),
+        column_title = "Correlation Heatmap Proteomics - with imputation")
+```

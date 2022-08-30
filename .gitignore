@@ -3,6 +3,7 @@ figures
 analyses/scrnaseq/*.pdf
 analyses/scrnaseq/tmp
 results
+*.html
 
 #Ipython
 *.ipynb
