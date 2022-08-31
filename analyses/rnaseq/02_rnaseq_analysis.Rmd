@@ -1,0 +1,466 @@
+---
+title: "RNAseq analysis"
+author: grst+chripla
+output: html_document
+params:
+  max_cores: 32
+  inputdir: "../../data/rnaseq"
+  inputdir_clinical: "../../data"
+  paper_figures: "../../results/Figures"
+---
+
+```{r setup, include=FALSE}
+library(conflicted)
+library(tibble)
+library(tidyr)
+library(ggplot2)
+library(factoextra)
+library(scales)
+library(ggrepel)
+library(RColorBrewer)
+library(dplyr)
+library(readr)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(cowplot)
+library(ComplexHeatmap)
+library(parallel)
+library(DESeq2)
+library(progeny)
+conflict_prefer("filter",  "dplyr")
+conflict_prefer("select",  "dplyr")
+conflict_prefer("rename", "dplyr")
+source("../../lib/global_params.R")
+```
+
+```{r, echo = FALSE}
+dir.create(file.path(params$paper_figures), showWarnings = FALSE)
+```
+
+### Load and reshape data
+```{r}
+tpmdata = read_tsv(file.path(params$inputdir, "rsem_tpm.tsv"))
+
+# Select only protein-coding genes:
+
+### Biomart keeps crashing, we therefore stored the list of proteins within the repo.
+protein_coding_genes = read_tsv("../../tables/protein_coding_genes.tsv")
+tpmdata_prot_coding = tpmdata |> filter(gene_id %in% protein_coding_genes$ensembl_gene_id)
+
+tpm_mat = tpmdata_prot_coding |> select(-gene_name) |> as.data.frame() |> column_to_rownames("gene_id")
+tpm_mat_symbol = tpmdata_prot_coding |> select(-gene_id) |> group_by(gene_name) |> summarise_all(sum) |> column_to_rownames("gene_name")
+
+tpm_mat = log1p(tpm_mat)
+tpm_mat_symbol = log1p(tpm_mat_symbol)
+
+split_sample = function(df) {
+  df |> separate(
+    sample,
+    c("organoid", "treatment"),
+    fill = "right",
+    extra = "merge",
+    sep = "_",
+    remove = FALSE
+  )
+}
+pdata = tpm_mat_symbol |> t() |> as_tibble(rownames = "sample") |> select(sample) |> split_sample()
+```
+
+```{r, include=FALSE}
+# Function for choosing duplicated genes (higher mean):
+reduce_duplicates <- function(rna) {
+  
+  # HGNC symbols as identifiers:
+  rna <- subset(rna, select=-gene_id)
+  # remove duplicates:
+  rna <- rna[!duplicated(rna),]
+
+  # get gene names which are present more than once:
+  duplicates <- rna[duplicated(rna$gene_name),]
+  duplicates <- as.vector(duplicates$gene_name)
+
+  # calculate mean expression of genes:
+  rna.mean <- cbind.data.frame(rna$gene_name,apply(rna[,2:length(rna)],1,mean), rep(1,nrow(rna)))
+  colnames(rna.mean) <- c('gene_name', 'count_mean', 'keep')
+
+  for (i in duplicates) {
+    x <- rna.mean[rna.mean$gene_name == i,]
+    x.max <- rownames(x[x$count_mean == max(x$count_mean),])
+    rna.mean[x.max,]$keep = 0
+  }
+
+  rna.mean$keep <- as.logical(rna.mean$keep)
+  rna.mean <- rna.mean[which(rna.mean$keep),]
+
+  rna <- rna[which(rownames(rna) %in% rownames(rna.mean)),]
+
+  rna <- rna |>
+    column_to_rownames('gene_name')
+  return(rna)
+}
+```
+
+
+### Heatmap of all genes
+
+The following code snippets produce a clustered heatmap of all genes. 
+
+ * all-zero genes are excluded
+ * The genes are z-scaled and clustered hierarchically by using Pearson correlation as distance and complete linkage. 
+ * 8 Major clusters are defined and annotated using GO enrichment analysis. 
+
+```{r, include=FALSE}
+organoid_ids = pdata |> filter(is.na(treatment)) |> pull(sample)
+# Add controls for organoids that have not been measured independently. 
+organoid_ids = c(organoid_ids, "CRC26LM_control", "CRC03_control", "CRC26_control")
+
+tpm_mat2 = tpm_mat[, organoid_ids]
+colnames(tpm_mat2) <- sub("_.*", "", colnames(tpm_mat2))
+
+tpm_mat_scaled =t(scale(t(tpm_mat2[!apply(tpm_mat2, 1, function(row) {all(row == 0)}),])))
+
+dist_obj = factoextra::get_dist(tpm_mat_scaled, "pearson")
+clust_obj = fastcluster::hclust(dist_obj)
+```
+
+Run GO analysis: 
+```{r, message=FALSE, warning=FALSE}
+N_CLUSTERS = 8
+clusters = cutree(clust_obj, k = N_CLUSTERS)
+universe = rownames(tpm_mat_scaled)
+
+# dummy see https://github.com/YuLab-SMU/clusterProfiler/issues/207
+.x = enrichGO(
+  c("CD8A"),
+  OrgDb = org.Hs.eg.db,
+  keyType = "SYMBOL",
+  ont = "BP",
+  universe = universe
+)
+
+# molecular function
+ego_mf = mclapply(unique(clusters), function(clus) {
+  genes = names(which(clusters == clus))
+  ego = enrichGO(
+    gene = genes,
+    OrgDb = org.Hs.eg.db,
+    keyType = "ENSEMBL",
+    ont = "MF",
+    pAdjustMethod = "BH",
+    pvalueCutoff = 0.01,
+    qvalueCutoff = 0.05,
+    universe = universe
+  )
+  ego@result$cluster = clus
+  ego
+}, mc.cores = params$max_cores)
+
+ego_bp = mclapply(unique(clusters), function(clus) {
+  genes = names(which(clusters == clus))
+  ego = enrichGO(
+    gene = genes,
+    OrgDb = org.Hs.eg.db,
+    keyType = "ENSEMBL",
+    ont = "BP",
+    pAdjustMethod = "BH",
+    pvalueCutoff = 0.01,
+    qvalueCutoff = 0.05,
+    universe = universe
+  )
+  ego@result$cluster = clus
+  ego
+}, mc.cores = params$max_cores)
+```
+Combine into dataframe: 
+```{r}
+# for some categories there are no enriched GO terms. Therefore the tryCatch. 
+go_mf = lapply(ego_mf, function(ego) {
+  tryCatch({
+    ego@result |> filter(p.adjust < 1)
+  }, error = function(e) {tibble()})
+}) |> bind_rows() |> mutate(abs_log_p = -log10(p.adjust))
+
+
+go_bp = lapply(ego_bp, function(ego) {
+  tryCatch({
+    ego@result |> filter(p.adjust < 1)
+  }, error = function(e) {tibble()})
+}) |> bind_rows() |> mutate(abs_log_p = -log10(p.adjust))
+```
+
+```{r}
+# Limit to 5 terms per cluster
+top_go_mf = go_mf |> group_by(cluster) |> mutate(rk = rank(pvalue, ties.method="min")) |> filter(rk <= 5) |> ungroup()
+top_go_bp = go_bp |> group_by(cluster) |> mutate(rk = rank(pvalue, ties.method="min")) |> filter(rk <= 5) |> ungroup()
+```
+
+Visualize GO terms: 
+```{r, fig.width=15, fig.height=15, message=FALSE}
+p_mf = top_go_mf |> select(Description, abs_log_p, cluster) |>
+  right_join(crossing(cluster=unique(clusters), Description=top_go_mf$Description)) |>
+  mutate(cluster = as.character(cluster)) |> 
+  ggplot(aes(y=Description, x=cluster, fill=abs_log_p)) + geom_tile(col='grey') + theme_cowplot() +
+  ylab("Molecular function") + scale_fill_distiller("-log10(FDR)", palette="YlGnBu", direction=1, na.value="white", limits=c(0, 15)) +
+   theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+p_bp = top_go_bp |> select(Description, abs_log_p, cluster) |> 
+  right_join(crossing(cluster=unique(clusters), Description=top_go_bp$Description)) |> 
+  mutate(cluster = as.character(cluster)) |> 
+  ggplot(aes(y=Description, x=cluster, fill=abs_log_p)) + geom_tile(col='grey') + theme_cowplot() + 
+  ylab("Biological process") + scale_fill_distiller("-log10(FDR)", palette="YlGnBu", direction=1, na.value="white", limits=c(0, 15)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+legend = get_legend(p_mf)
+p_mf = p_mf + theme(legend.position = "none")
+p_bp = p_bp + theme(legend.position = "none")
+plot_grid(
+  plot_grid(p_mf, p_bp, ncol=1, align="v", rel_heights = c(.3, .45)),
+  legend,
+  nrow=1, 
+  rel_widths = c(.8, .2)
+)
+```
+
+Produce heatmap: 
+```{r, fig.height=4.5, fig.width=5.5, message=FALSE}
+cluster_annotations = list(
+  "1"="detection of\nchemical stimulus",
+  "2"="cellular sodium ion\nhomeostasis",
+  "3"="oxidative\nphosphorylation",
+  "4"="",
+  "5"="hormone metabolic\nprocess",
+  "6"="extracellular matrix\norganization",
+  "7"="protein polyubiquination",
+  "8"="chemokine-mediated\nsignalling pathway"
+)
+annotation_df = data.frame(cluster = as.character(clusters))
+
+ha = rowAnnotation(clusters=anno_empty(border=FALSE, width=unit(50, 'mm')))
+
+Heatmap(tpm_mat_scaled, 
+        left_annotation=ha, 
+        cluster_rows=clust_obj,
+        cluster_columns =TRUE,
+        show_row_names = FALSE,
+        show_row_dend = FALSE,
+        show_column_dend = FALSE,
+        clustering_distance_columns = "pearson",
+        row_title = NULL,
+        split = N_CLUSTERS,
+        name = "z-score",
+        use_raster=TRUE)
+
+palette(brewer.pal(N_CLUSTERS, "Set2"))
+lapply(names(cluster_annotations), function(c) {
+  decorate_annotation("clusters", slice = c, {
+    grid.rect(x=1, width=unit(2, "mm"), just="right", gp = gpar(fill = c, col=NA))
+    grid.text(cluster_annotations[[c]], just="right", x=unit(45, "mm"), gp=gpar(fontsize=12, lineheight=.8))
+  })
+})
+```
+
+
+Save as SuppFigure1C.
+```{r, echo = FALSE}
+pdf(file.path(params$paper_figures, "SuppFigure1C.pdf"), width = 8, height = 9, pointsize = 30)
+Heatmap(tpm_mat_scaled, 
+        left_annotation=ha, 
+        cluster_rows=clust_obj,
+        cluster_columns =TRUE,
+        show_row_names = FALSE,
+        show_row_dend = FALSE,
+        show_column_dend = FALSE,
+        clustering_distance_columns = "pearson",
+        row_title = NULL,
+        split = N_CLUSTERS,
+        name = "z-score",
+        use_raster = TRUE)
+
+palette(brewer.pal(N_CLUSTERS, "Set2"))
+lapply(names(cluster_annotations), function(c) {
+  decorate_annotation("clusters", slice = c, {
+    grid.rect(x=1, width=unit(2, "mm"), just="right", gp = gpar(fill = c, col=NA))
+    grid.text(cluster_annotations[[c]], just="right", x=unit(45, "mm"), gp=gpar(fontsize=12, lineheight=.8))
+  })
+})
+dev.off()
+```
+
+
+
+### PROGENy 
+
+Function for preparing the gene expression matrix:
+```{r}
+vstnorm<-function(cdata)  {
+  
+  cdata<-round(cdata)
+  dset<-DESeqDataSetFromMatrix(cdata, colData=data.frame(id=colnames(cdata)), design=~1)
+  dset<-estimateSizeFactors(dset)
+  dset<-estimateDispersions(dset)
+  ndata<-getVarianceStabilizedData(dset)
+  
+  return(ndata)
+}
+``` 
+
+Load countdata and clinical data for MSI status:
+```{r}
+countdata <- read_tsv(file.path(params$inputdir, "featurecount_counts.tsv"))
+count.mat <- reduce_duplicates(countdata)
+clinical <- read_tsv(file.path(params$inputdir_clinical, "clinical_data_organoids.tsv"))
+``` 
+
+Get MSI status from clinical data:
+```{r}
+msi_status <- clinical |> 
+  rename(organoid = `Organoids code`,
+         MSI_status = `MSI / MSS (IHC)`) |>
+  select(organoid, MSI_status)
+msi_status <- msi_status[order(msi_status$MSI_status),]
+msi_status <- msi_status |>
+  column_to_rownames('organoid')
+```
+
+Normalize and run progeny:
+```{r}
+ndata <- vstnorm(count.mat)
+pathways <- progeny(ndata, scale=TRUE)
+``` 
+
+Select only organoids from baseline experiments:
+```{r, include=FALSE}
+org_names = c('CRC01', 'CRC02', 'CRC03_control', 'CRC04', 'CRC11', 'CRC12','CRC13', 'CRC15','CRC17','CRC18','CRC19','CRC20', 'CRC21', 'CRC22', 'CRC26_control', 'CRC26LM_control')
+vars <- row.names(pathways) %in% org_names
+org <- t(pathways[vars , ])
+colnames(org) <- gsub("_.*", "", colnames(org))
+```
+
+```{r, fig.height=7, fig.width=10}
+# Add annotation for MSI/MSS:
+ha <- HeatmapAnnotation(df = msi_status, 
+                        annotation_label =  "MSI status",
+                        col = list(MSI_status = c(colors$msi_status)),
+                        show_legend = FALSE,
+                        simple_anno_size_adjust =  TRUE)
+# reorder dataframe:
+org <- org[,rownames(msi_status)]
+
+h <- Heatmap(org,
+             top_annotation = ha,
+             name="Activity score",
+             column_names_gp = gpar(fontsize=30),
+             row_names_gp = gpar(fontsize=30),
+             heatmap_legend_param = list(at = c(-4,-2,0,2,4), labels=c('-4', '-2', '  0', '  2', '  4'), labels_gp = gpar(fontsize=30), 
+                                    title_gp = gpar(fontsize=30), title_position = "leftcenter-rot", legend_height= unit(7, 'cm')))
+```
+
+Export as Figure 2B:
+```{r, echo = FALSE}
+pdf(file.path(params$paper_figures, "Figure2B.pdf"), width = 20, height=15, pointsize = 30)
+draw(h, heatmap_legend_side= "left")
+dev.off()
+``` 
+
+### Expression of immune relevant genes:
+
+Load list of genes:
+```{r, warning=FALSE}
+file.immunegs <- "../../tables/immune_gs.tsv"
+immune.gs <- read_tsv(file.immunegs)
+```
+
+Prepare tpm matrix:
+```{r}
+#TPM preprocessing:
+rna.tpm <- reduce_duplicates(tpmdata)
+
+#select only matching samples:
+rna.tpm <- rna.tpm[, names(rna.tpm) %in% org_names] 
+rna.tpm <- rna.tpm[ , order(names(rna.tpm))]
+colnames(rna.tpm) <- sub("_.*", "", colnames(rna.tpm))
+
+#transform to log2 scale:
+rna.tpm.log <- log2(rna.tpm+1)
+```
+
+
+### Heatmap of immune-relevant genes:
+```{r, fig.height=35, fig.width=10}
+rna.immune.gs <- rna.tpm.log |> filter(rownames(rna.tpm.log) %in% immune.gs$gene)
+
+#remove genes which are not expressed in any of the samples:
+rna.immune.gs <- rna.immune.gs[rowSums(rna.immune.gs) != 0, ]
+
+annot_row <- structure(list(group = immune.gs$group), .Names = "group", row.names = immune.gs$gene, class = "data.frame")
+annot_row <- annot_row |> filter(rownames(annot_row) %in% rownames(rna.immune.gs))
+immune.mat.ordered <- rna.immune.gs[rownames(annot_row),]
+
+#scale
+immune.mat.ordered.scaled <- t(scale(t(immune.mat.ordered)))
+#plot clustered heatmap
+Heatmap(immune.mat.ordered.scaled,
+        cluster_rows = FALSE,
+        row_split = annot_row,
+        name='z-score')
+```
+
+### Selected genes for heatmap (RNA):
+
+Gene panel: 
+PD-L1, CD47, TGFß, IL6, IL10, IL33, B2M, HLA A, HLA B, HLA C, TAP1, TAP2, CXCR4, CXCL1, CXCL2, CXCL7, CXCL9, CXCL10, CXCL13, CCL2, CCL3, CCL4, CCL5 and interferon genes (metagene for all interferon genes)
+
+```{r, fig.height=8, fig.width=10}
+gl <- c("CD274", "CD47", "TGFB1", "IL6", "IL10", "IL33", "B2M", "HLA-A", "HLA-B", "HLA-C", "TAP1", "TAP2", "CXCR4", "CXCL1", "CXCL2", "PPBP", "CXCL9", "CXCL10", "CXCL13", "CCL2", "CCL3", "CCL4", "CCL5")
+
+sg <- immune.mat.ordered |> filter(rownames(immune.mat.ordered) %in% gl)
+
+#calculate IFNg metagene expression 
+## interferon genes from Benci et al., Cell 2019, 178
+## (including CXCL1, CXCL10, HLA-B and HLA-G as they are in different groups in the table):
+ifng <- immune.gs[immune.gs$group == "IFNg" | immune.gs$gene %in% c('CXCL1', 'CXCL10', 'HLA-B', 'HLA-G'),]
+tpm.ifng <- immune.mat.ordered |> filter(rownames(immune.mat.ordered) %in% ifng$gene)
+tpm.ifng.avg <- colMeans(tpm.ifng, na.rm=TRUE)
+
+sg1 <- rbind(sg, tpm.ifng.avg)
+rownames(sg1)[dim(sg1)[[1]]] <- "ISG.RS"
+
+isg.rs<-data.frame("IFNg")
+names(isg.rs)<-c("group")
+rownames(isg.rs) <- "ISG.RS"
+
+annot_row <- rbind(annot_row, isg.rs)
+
+#scale:
+sg1 <- as.matrix(t(scale(t(sg1))))
+```
+
+
+Plot heatmap of gene panel:
+```{r, fig.height=8, fig.width=10}
+# annotation
+annotation_df = as.data.frame(annot_row[rownames(annot_row) %in% rownames(sg1)  , ])
+rownames(annotation_df) <- rownames(sg1)
+colnames(annotation_df) <- "group"
+
+colors <- c("APCr" = "paleturquoise2", "chemokine" = "lightgreen", "chemokine.r" = "royalblue1", "cytokine" = "lightpink1", "HLA" = "lightgoldenrod1", "IFNg" = "grey")
+
+# rename 'CD274' to 'PD-L1':
+rownames(sg1)[rownames(sg1)=="CD274"] <- "PD-L1"
+
+hm <- Heatmap(sg1,
+        cluster_rows = FALSE, cluster_columns = TRUE,
+        column_names_gp = gpar(fontsize=30),
+        row_names_gp = gpar(fontsize=30),
+        left_annotation = rowAnnotation(df = annotation_df, col=list(group=colors), 
+                                        annotation_legend_param = list(title_gp = gpar(fontsize=30), labels_gp = gpar(fontsize=30))),
+        row_split=annotation_df, row_title= " ",
+        heatmap_legend_param = list(title="z-score", labels_gp= gpar(fontsize=30), title_gp = gpar(fontsize=30), at = c(-4,-2,0,2,4), 
+                                    labels=c('-4', '-2', '  0', '  2', '  4')))
+
+pdf(file.path(params$paper_figures, "SuppFigure1D.pdf"), width = 20, height=20, pointsize = 30)
+draw(hm, heatmap_legend_side= "bottom", annotation_legend_side="bottom")
+dev.off()
+```

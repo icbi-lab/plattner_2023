@@ -1,0 +1,155 @@
+---
+title: "rnaseq-qc"
+author: grst+chripla
+output: html_document
+params:
+  only_protein_coding: TRUE
+  inputdir: "../../data/rnaseq"
+---
+
+```{r setup, include=FALSE}
+library(conflicted)
+library(tibble)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(ggrepel)
+library(dplyr)
+conflict_prefer("filter",  "dplyr")
+conflict_prefer("select",  "dplyr")
+library(readr)
+library(umap)
+library(ComplexHeatmap)
+source("../../lib/global_params.R")
+```
+
+### Load and reshape data
+```{r}
+tpmdata = read_tsv(file.path(params$inputdir, "rsem_tpm.tsv"))
+
+if (params$only_protein_coding) {
+  # Biomart keeps crashing, we therefore stored the list of proteins within the repo.
+  protein_coding_genes = read_tsv("../../tables/protein_coding_genes.tsv")
+  tpmdata = tpmdata |> filter(gene_id %in% protein_coding_genes$ensembl_gene_id)
+}
+
+tpm_mat = tpmdata |> select(-gene_name) |> as.data.frame() |> column_to_rownames("gene_id")
+tpm_mat_symbol = tpmdata |> select(-gene_id) |> group_by(gene_name) |> summarise_all(sum) |> column_to_rownames("gene_name")
+
+tpm_mat = log1p(tpm_mat)
+tpm_mat_symbol = log1p(tpm_mat_symbol)
+
+split_sample = function(df) {
+  df |> separate(
+    sample,
+    c("organoid", "treatment"),
+    fill = "right",
+    extra = "merge",
+    sep = "_",
+    remove = FALSE
+  )
+}
+pdata = tpm_mat_symbol |> t() |> as_tibble(rownames = "sample") |> select(sample) |> split_sample()
+```
+
+### PCA of organoids
+```{r}
+organoid_ids = pdata |> filter(is.na(treatment)) |> pull(sample)
+# Add controls for organoids that have not been measured independently. 
+organoid_ids = c(organoid_ids, "CRC26LM_control", "CRC03_control", "CRC26_control")
+pca = prcomp(tpm_mat_symbol[,organoid_ids] |> t())
+pca_df = pca$x |> as_tibble(rownames="sample") |> split_sample()
+
+# set cutoff for PC1 for GO analysis:
+rna.pc1 <- pca$rotation[abs(pca$rotation[,1]) >= 0.025, ]
+dim(rna.pc1)
+```
+
+```{r, fig.width=5.5, fig.height=5}
+variance_explained = summary(pca)$importance["Proportion of Variance", ]
+p = ggplot(pca_df, aes(x=PC1, y=PC2)) + 
+  geom_point(aes(color=organoid)) + 
+  scale_color_manual(values=colors$organoid) + 
+  theme_bw() + 
+  xlim(min(pca_df$PC1), 1.1*max(pca_df$PC1)) + 
+  geom_text_repel(aes(label=organoid), point.padding=.3) + 
+  xlab(paste0("PC1 (", label_percent()(variance_explained[1]), ")")) + 
+  ylab(paste0("PC2 (", label_percent()(variance_explained[2]), ")")) + 
+  theme(legend.position = "none") + 
+  ggtitle("PCA of organoids")
+
+p
+```
+
+### PCA of treatments
+```{r}
+sample_ids = pdata |> filter(!is.na(treatment)) |> pull(sample)
+pca = prcomp(tpm_mat_symbol[,sample_ids] |> t())
+pca_df = pca$x |> as_tibble(rownames="sample") |> split_sample()
+```
+
+```{r, fig.width=6, fig.height=4.5}
+labels = c(sample_ids[grep("control", sample_ids)], "CRC26LM_TBKi", "CRC26_TBKi")
+pca_df = pca_df |> mutate(label=if_else(sample %in% labels, sample, ""))
+
+variance_explained = summary(pca)$importance["Proportion of Variance", ]
+ggplot(pca_df, aes(x=PC1, y=PC2)) + 
+  geom_point(aes(color=organoid)) + 
+  scale_color_manual(values=colors$organoid) + 
+  geom_text_repel(aes(label=label), min.segment.length = 0) +
+  theme_bw() + 
+  xlim(min(pca_df$PC1), 1.1*max(pca_df$PC1)) + 
+  xlab(paste0("PC1 (", label_percent()(variance_explained[1]), ")")) + 
+  ylab(paste0("PC2 (", label_percent()(variance_explained[2]), ")")) +
+  ggtitle("PCA of treated organoids")
+```
+
+### UMAP of treatments
+```{r}
+umap_df = umap(tpm_mat_symbol[, sample_ids] |> t(),
+               method = "naive",
+               random_state = 42)$layout |> as.data.frame() |> as_tibble(rownames ="sample") |> split_sample()
+labels = sample_ids[grep("control", sample_ids)]
+umap_df = umap_df |> 
+  mutate(label = if_else(sample %in% labels, sample, "")) |>
+  filter(sample != "CRC02_control2") |> 
+  mutate(label = if_else(label == "CRC02_control1", "CRC02_control", label))
+```
+
+```{r, fig.width=6, fig.height=4.5}
+ggplot(umap_df, aes(x=V1, y=V2)) + 
+  geom_point(aes(color=organoid)) + 
+  scale_color_manual(values=colors$organoid) + 
+  geom_text_repel(aes(label=label), min.segment.length = 0) +
+  theme_bw() + 
+  xlab("UMAP1") + 
+  ylab("UMAP2") +
+  ggtitle("UMAP of treated organoids")
+```
+
+
+### Correlation
+```{r}
+cor_df = cor(tpm_mat[, sample_ids])
+```
+
+```{r, fig.width=10, fig.height=10}
+annotation_df = pca_df |>
+  select("sample", "organoid", "treatment") |>
+  as.data.frame() |>
+  mutate(treatment = if_else(grepl("control", treatment), "control", treatment)) |>
+  column_to_rownames("sample")
+
+unique_organoids = annotation_df$organoid |> unique() 
+unique_treatments = annotation_df$treatment |> unique() 
+
+Heatmap(
+  cor_df,
+  name='corr',
+  left_annotation = rowAnnotation(df = annotation_df, col = colors),
+  top_annotation = columnAnnotation(
+    df = annotation_df,
+    col = colors,
+    show_legend = FALSE),
+)
+```
