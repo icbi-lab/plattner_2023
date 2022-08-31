@@ -1,0 +1,214 @@
+---
+title: "Combined proteomics and RNAseq analysis"
+author: chripla
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: html_document
+params:
+  inputdir_prot: "../../data/proteomics"
+  inputdir_rna: "../../data/rnaseq"
+  resultdir:  "../../results/proteomics"
+  paper_figures: "../../results/Figures"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(conflicted)
+library(readr)
+library(tibble)
+library(ggplot2)
+library(ggrepel)
+options(ggrepel.max.overlaps = Inf)
+library(ggpubr)
+library(dplyr)
+conflict_prefer("filter", "dplyr")
+conflict_prefer("select", "dplyr")
+library(circlize)
+```
+
+```{r, echo = FALSE}
+dir.create(file.path(params$paper_figures), showWarnings = FALSE)
+dir.create(file.path(params$resultdir), showWarnings = FALSE)
+```
+
+```{r, include=FALSE}
+## Function for excluding non distinct proteins:
+exclude_proteins <- function(prot, genes = FALSE) {
+  y <- grep("[^0-9]", (substring(prot$Protein, 1, 1)))
+  prot <- prot[y, ]
+  
+  if (genes == TRUE) {
+    # exclude non distinct genes:
+    prot = prot[!is.na(prot$`Gene name`),]
+    prot = prot[prot$`Gene name` != '', ]
+    prot <- prot[!duplicated(prot$`Gene name`),] |>
+      column_to_rownames("Gene name")
+  } else {
+    rownames(prot) <- prot$Protein
+  }
+  prot <- prot[, startsWith(names(prot), "CRC")]
+  return(prot)
+}
+```
+
+
+```{r, include=FALSE}
+# Function for choosing duplicated genes (higher mean):
+reduce_duplicates <- function(rna) {
+  
+  # HGNC symbols as identifiers:
+  rna <- subset(rna, select=-gene_id)
+  # remove duplicates:
+  rna <- rna[!duplicated(rna),]
+
+  # get gene names which are present more than once:
+  duplicates <- rna[duplicated(rna$gene_name),]
+  duplicates <- as.vector(duplicates$gene_name)
+
+  # calculate mean expression of genes:
+  rna.mean <- cbind.data.frame(rna$gene_name,apply(rna[,2:length(rna)],1,mean), rep(1,nrow(rna)))
+  colnames(rna.mean) <- c('gene_name', 'count_mean', 'keep')
+
+  for (i in duplicates) {
+    x <- rna.mean[rna.mean$gene_name == i,]
+    x.max <- rownames(x[x$count_mean == max(x$count_mean),])
+    rna.mean[x.max,]$keep = 0
+  }
+
+  rna.mean$keep <- as.logical(rna.mean$keep)
+  rna.mean <- rna.mean[which(rna.mean$keep),]
+
+  rna <- rna[which(rownames(rna) %in% rownames(rna.mean)),]
+
+  rna <- rna |>
+    column_to_rownames('gene_name')
+  return(rna)
+}
+```
+
+
+Load Proteome and Transcriptome:
+```{r}
+#proteins:
+file.prot.avg <- "protein_level_baseline_woImp_averaged.txt"
+prot.avg <- read_tsv(file.path(params$inputdir_prot, file.prot.avg))
+prot.avg <- exclude_proteins(prot.avg, genes=TRUE)
+
+#RNA - TPMs:
+tpmdata <- read_tsv(file.path(params$inputdir_rna, "rsem_tpm.tsv"))
+
+#TPM preprocessing:
+rna.tpm <- reduce_duplicates(tpmdata)
+
+#select only matching samples:
+org.names <- c(names(prot.avg), "CRC03_control", "CRC26_control", "CRC26LM_control")
+rna.tpm <- rna.tpm[, names(rna.tpm) %in% org.names] 
+rna.tpm <- rna.tpm[ , order(names(rna.tpm))]
+colnames(rna.tpm) <- sub("_.*", "", colnames(rna.tpm))
+
+#transform to log2 scale:
+rna.tpm.log <- log2(rna.tpm+1)
+prot.avg.log <- log2(prot.avg+1)
+
+# set missing values to NA:
+prot.avg.log[prot.avg.log==0]<-NA
+```
+
+### Select matching genes:
+```{r}
+#get all matching genes:
+x <- intersect(rownames(prot.avg), tpmdata$gene_name)
+
+#reduce dataframes with matching genes:
+prot.avg.red <- prot.avg.log[rownames(prot.avg.log) %in% x, ]
+rna.tpm.red <- rna.tpm.log[rownames(rna.tpm.log) %in% x,]
+
+#order genes:
+rna.tpm <- rna.tpm.red[order(rownames(rna.tpm.red)),]
+prot.avg <- prot.avg.red[order(rownames(prot.avg.red)),]
+
+table(rownames(rna.tpm) == rownames(prot.avg))
+
+cor <- cor(rna.tpm, prot.avg, use="complete.obs")
+```
+
+### Gene-wise correlation
+
+```{r}
+gene.cor <- as.data.frame(rownames(prot.avg))
+colnames(gene.cor) <- "gene"
+
+for (j in 1:dim(prot.avg)[[1]]){
+    
+  # minimum number of matching RNA/Proteome samples = 4
+   if ( sum(is.na(t(prot.avg[j,]) + t(rna.tpm[j,]))) < 12 ){  
+    gene.cor$corr[j] <- cor(t(prot.avg[j,]), t(rna.tpm[j,]), use="pairwise.complete.obs", method="pearson")
+   }
+  else
+    gene.cor$corr[j] <- NA
+}
+
+# delete entries with NA (no complete cases):
+table(is.na(gene.cor$corr))
+gene.cor <- gene.cor[complete.cases(gene.cor), ]
+```
+
+
+### Load IntOGen driver gene list:
+(https://www.intogen.org/search?cancer=COREAD)
+
+```{r}
+file.drivergenes <- "../../tables/IntOGen-DriverGenes_COREAD.tsv"
+drivergenes <- read.table(file.drivergenes, sep="\t", header=TRUE, stringsAsFactors = FALSE)
+drivergenes <- drivergenes$Symbol
+keygenes <- subset(gene.cor, gene.cor$gene %in% drivergenes)
+```
+
+
+### Load list of immune-relevant genes:
+```{r, warning=FALSE}
+file.immunegs <- "../../tables/immune_gs.tsv"
+immune.gs <- read_tsv(file.immunegs)
+```
+
+Select immune-relevant genes:
+```{r, fig.height=35, fig.width=10}
+annot_row <- structure(list(group = immune.gs$group), .Names = "group", row.names = immune.gs$gene, class = "data.frame")
+annot_row <- annot_row |> filter(rownames(annot_row) %in% rownames(rna.tpm))
+immune.mat.ordered <- rna.tpm[rownames(annot_row),]
+immune.gene.cor <- subset(gene.cor, gene.cor$gene %in% rownames(immune.mat.ordered))
+```
+
+
+### Histogram including driver genes and immune-relevant genes:
+```{r, fig.height=10, fig.width=15}
+goi <- cbind(keygenes, rep("black", length(keygenes$gene)))
+colnames(goi)[3] <- "group"
+goi.immune.gene.cor <- cbind(immune.gene.cor, rep("red", length(immune.gene.cor$gene)))
+colnames(goi.immune.gene.cor)[3] <- "group"
+goi <- rbind(goi, goi.immune.gene.cor)
+goi <- goi[order(goi$gene),] # order genes according to correlation for correct colors in plot
+
+p <- gghistogram(gene.cor, x = "corr", y = "..count..",
+                 xlab = "Pearson Correlation",
+                 ylab = "Number of genes",
+                 add.params = list(size=30),
+                 binwidth = 0.05, 
+                 fill = "darkblue", color = "darkblue", alpha = 0.9,
+                 label = "gene", label.select = goi$gene, repel = TRUE,
+                 label.rectangle = TRUE,
+                 font.label= list(size=20, color=goi$group))
+
+p + geom_vline(xintercept = mean(gene.cor$corr), linetype="dashed") +
+  theme(axis.text=element_text(size=20),  axis.title=element_text(size=20) , plot.title = element_text(size=22))
+```
+
+Save as Figure2D.
+```{r, echo = FALSE}
+pdf(file.path(params$paper_figures, "Figure2D.pdf"), width = 20, height=10, pointsize = 30)
+p + geom_vline(xintercept = mean(gene.cor$corr), linetype="dashed") +
+  theme(axis.text=element_text(size=30),  axis.title=element_text(size=30))
+dev.off()
+```
