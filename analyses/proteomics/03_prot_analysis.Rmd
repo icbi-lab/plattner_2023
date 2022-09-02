@@ -1,0 +1,521 @@
+---
+title: "Proteomics analysis"
+author: chripla + grst
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: html_document
+params:
+  maxcores: 6
+  inputdir: "../../data/proteomics"
+  inputdir_clinical: "../../data"
+  resultdir:  "../../results/proteomics"
+  paper_figures: "../../results/Figures"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(conflicted)
+library(dplyr)
+library(tibble)
+library(ggbiplot)
+library(factoextra)
+library(tidyr)
+library(ggrepel)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(cowplot)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(readxl)
+library(biomaRt)
+library(reshape2)
+library(tidyverse)
+library(parallel)
+library(msigdbr)
+library(GSVA)
+conflict_prefer("crossing", "tidyr")
+conflict_prefer("get_legend", "ggpubr")
+conflict_prefer("filter",  "dplyr")
+conflict_prefer("select",  "dplyr")
+conflict_prefer("mutate",  "dplyr")
+conflict_prefer("rename", "dplyr")
+source("../../lib/global_params.R") # import color-codes
+```
+
+
+```{r, include=FALSE}
+## Function for excluding non distinct proteins:
+exclude_proteins <- function(prot, genes = FALSE) {
+  y <- grep("[^0-9]", (substring(prot$Protein, 1, 1)))
+  prot <- prot[y, ]
+  
+  if (genes == TRUE) {
+    # exclude non distinct genes:
+    prot = prot[!is.na(prot$`Gene name`),]
+    prot = prot[prot$`Gene name` != '', ]
+    prot <- prot[!duplicated(prot$`Gene name`),] |>
+      column_to_rownames("Gene name")
+  } else {
+    rownames(prot) <- prot$Protein
+  }
+  prot <- prot[, startsWith(names(prot), "CRC")]
+  return(prot)
+}
+```
+
+
+### Load files:
+1. analysis output for all organoids (with and without imputation) including intensity values for all replicates
+2. clinical sample annotation
+
+```{r}
+##1
+file.prot.avg.wImp <- file.path(params$inputdir, "protein_level_baseline_wImp_averaged.txt")
+file.prot.avg <- file.path(params$inputdir, "protein_level_baseline_woImp_averaged.txt")
+file.prot.wImp <- file.path(params$inputdir, "protein_level_baseline_wImp.txt")
+
+prot.avg <- read_tsv(file.prot.avg)
+prot.avg.wImp <- read_tsv(file.prot.avg.wImp)
+prot.wImp <- read_tsv(file.prot.wImp)
+
+##2
+clinical <- read_tsv(file.path(params$inputdir_clinical, "clinical_data_organoids.tsv"))
+```
+
+
+Reshape data and exclude non-distinct proteins:
+```{r}
+# For the file with replicates, add gene names from annotation table:
+prot_to_genename <- read_tsv("../../tables/prot_to_gene_name.tsv")
+prot.wImp <- prot.wImp |>
+  left_join(prot_to_genename) |>
+  select(-c('nFragment', 'nPeptide'))
+
+# exclude non distinct proteins:
+prot.avg <- exclude_proteins(prot.avg, genes=TRUE)
+prot.avg.wImp <- exclude_proteins(prot.avg.wImp, genes=TRUE)
+prot.wImp <- exclude_proteins(prot.wImp, genes=TRUE)
+
+# ordered list according to mutations:
+samples_ordered <- c("CRC22", "CRC19", "CRC13", "CRC01", "CRC15", "CRC04", "CRC03", "CRC02", "CRC12",  "CRC26LM", "CRC17", "CRC20", "CRC26", "CRC11", "CRC18", "CRC21")
+prot.avg <- prot.avg[, match(samples_ordered, names(prot.avg))] 
+prot.avg.wImp <- prot.avg.wImp[, match(samples_ordered, names(prot.avg.wImp))]
+
+# set missing values to NA in the non-imputed data frame:
+prot.avg[prot.avg==0]<-NA
+
+# transform to log2-scale:
+prot.avg <- log2(prot.avg +1)
+prot.avg.wImp <- log2(prot.avg.wImp+1)
+prot.wImp <- log2(prot.wImp +1)
+
+#rename CRC03_L to CRC03:
+names(prot.wImp) <- gsub("L_", "", names(prot.wImp))
+```
+
+### PCA from averaged replicates:
+
+```{r, fig.width=6, fig.height=4.5}
+prot.pca <- na.omit(prot.avg.wImp)
+prot.pca <- as.data.frame(t(prot.pca))
+
+prot.pca <- prcomp(prot.pca)
+prot.pca.df <- prot.pca$x |> as_tibble(rownames="sample") |> separate(sample, "organoid", fill="right", extra="merge", sep="_", remove=FALSE)
+prot.pca.df$organoid <- sub("_.*", "", prot.pca.df$organoid)
+
+ggbiplot(prot.pca, var.axes = FALSE,  groups=prot.pca.df$organoid) +
+           geom_text_repel(label = prot.pca.df$sample) + #add labels non-overlapping (ggrepel-package)
+           theme_bw()+
+           theme(legend.position = "none")+
+           scale_color_manual(values=colors$organoid) + 
+           ggtitle("PCA - Proteomics (with imputation)")
+
+```
+
+Cutoff for GO analysis:
+```{r, fig.width=8, fig.height=6}
+plot(sort(prot.pca$rotation))
+
+plot(sort(prot.pca$rotation[,1]))
+
+# take +/- 0.025 as cut-off
+prot.pc1 <- prot.pca$rotation[abs(prot.pca$rotation[,1]) >= 0.025, ]
+dim(prot.pc1)
+```
+GO-analysis - molecular function:
+```{r}
+genes.pc1 <- rownames(prot.pc1)
+
+go.pc1 = enrichGO(gene=genes.pc1, OrgDb=org.Hs.eg.db, keyType="SYMBOL", ont = "MF", pAdjustMethod = "BH", pvalueCutoff = 0.01, qvalueCutoff = 0.05)
+go.pc1@result <- go.pc1@result |> filter(p.adjust < 1) |> bind_rows() |> mutate(abs_log_p = -log10(p.adjust))
+
+pc1_top_go_mf = go.pc1  |> mutate(rk = rank(pvalue, ties.method="min")) |> filter(rk <= 10)
+pc1_top_go_mf@result
+```
+
+
+### Heatmap of all proteins with GO analysis
+
+The following code snippets produce a clustered heatmap of all proteins. 
+ * all-zero proteins are excluded
+ * The protein levels are z-scaled and clustered hierarchically by using Pearson correlation as distance and complete linkage. 
+ * 8 Major clusters are defined and annotated using GO enrichment analysis. 
+
+```{r, fig.width=4, fig.height=7}
+tpm_mat2 = prot.avg.wImp
+colnames(tpm_mat2) <- sub("_.*", "", colnames(tpm_mat2))
+
+tpm_mat_scaled =t(scale(t(tpm_mat2[!apply(tpm_mat2, 1, function(row) {all(is.na(row))}),])))
+
+dist_obj = factoextra::get_dist(tpm_mat_scaled, "pearson")
+clust_obj = fastcluster::hclust(dist_obj)
+```
+
+Run GO analysis: 
+```{r}
+N_CLUSTERS = 8
+clusters = cutree(clust_obj, k=N_CLUSTERS)
+universe = rownames(tpm_mat_scaled)
+
+# dummy see https://github.com/YuLab-SMU/clusterProfiler/issues/207
+.x = enrichGO(c("CD8A"), OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = "BP", universe = universe)
+
+# molecular function
+ego_mf = mclapply(unique(clusters), function(clus) {
+  genes = names(which(clusters == clus))
+  ego = enrichGO(gene=genes, OrgDb=org.Hs.eg.db, keyType="SYMBOL", ont = "MF", pAdjustMethod = "BH", pvalueCutoff = 0.01, qvalueCutoff = 0.05, universe=universe)
+  ego@result$cluster =clus
+  ego
+}, mc.cores=32)
+
+# biological process
+ego_bp = mclapply(unique(clusters), function(clus) {
+  genes = names(which(clusters == clus))
+  ego = enrichGO(gene=genes, OrgDb=org.Hs.eg.db, keyType="SYMBOL", ont = "BP", pAdjustMethod = "BH", pvalueCutoff = 0.01, qvalueCutoff = 0.05, universe=universe)
+  ego@result$cluster =clus
+  ego
+}, mc.cores=32)
+```
+Combine into dataframe: 
+```{r}
+# for some categories there are no enriched GO terms. Therefore the tryCatch. 
+go_mf = lapply(ego_mf, function(ego) {
+  tryCatch({
+    ego@result %>% filter(p.adjust < 1)
+  }, error = function(e) {tibble()})
+}) %>% bind_rows() %>% mutate(abs_log_p = -log10(p.adjust))
+
+
+go_bp = lapply(ego_bp, function(ego) {
+  tryCatch({
+    ego@result %>% filter(p.adjust < 1)
+  }, error = function(e) {tibble()})
+}) %>% bind_rows() %>% mutate(abs_log_p = -log10(p.adjust))
+```
+
+```{r}
+# Limit to 5 terms per cluster
+top_go_mf = go_mf |> group_by(cluster) |> mutate(rk = rank(pvalue, ties.method="min")) |> filter(rk <= 5) |> ungroup()
+top_go_bp = go_bp |> group_by(cluster) |> mutate(rk = rank(pvalue, ties.method="min")) |> filter(rk <= 5) |> ungroup()
+```
+
+Visualize GO terms: 
+```{r, fig.width=15, fig.height=15}
+p_mf = top_go_mf |> select(Description, abs_log_p, cluster) |> 
+  right_join(crossing(cluster=unique(clusters), Description=top_go_mf$Description)) |>
+  mutate(cluster = as.character(cluster)) |>
+  ggplot(aes(y=Description, x=cluster, fill=abs_log_p)) + geom_tile(col='grey') + theme_cowplot() +
+  ylab("Molecular function") + scale_fill_distiller("-log10(FDR)", palette="YlGnBu", direction=1, na.value="white", limits=c(0, 15)) +
+   theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+p_bp = top_go_bp %>% select(Description, abs_log_p, cluster) |> 
+  right_join(crossing(cluster=unique(clusters), Description=top_go_bp$Description)) |>
+  mutate(cluster = as.character(cluster)) |> 
+  ggplot(aes(y=Description, x=cluster, fill=abs_log_p)) + geom_tile(col='grey') + theme_cowplot() + 
+  ylab("Biological process") + scale_fill_distiller("-log10(FDR)", palette="YlGnBu", direction=1, na.value="white", limits=c(0, 15)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+legend = get_legend(p_mf)
+p_mf = p_mf + theme(legend.position = "none")
+p_bp = p_bp + theme(legend.position = "none")
+plot_grid(
+  plot_grid(p_mf, p_bp, ncol=1, align="v", rel_heights = c(.3, .45)),
+  legend,
+  nrow=1, 
+  rel_widths = c(.8, .2)
+)
+```
+
+Produce heatmap: 
+```{r, fig.height=4.5, fig.width=5.5}
+cluster_annotations = list(
+  "1"="protein localization\nto plasma membrane",
+  "2"="protein localization\nto chromosome",
+  "3"="metabolic processes",
+  "4"="translational activity",
+  "5"="RNA processing",
+  "6"="extracellular\nmatrix organization",
+  "7"="",
+  "8"="exocytosis"
+)
+annotation_df = data.frame(cluster = as.character(clusters))
+
+ha = rowAnnotation(clusters=anno_empty(border=FALSE, width=unit(50, 'mm')))
+
+Heatmap(tpm_mat_scaled, 
+        left_annotation=ha, 
+        cluster_rows=clust_obj,
+        cluster_columns =TRUE,
+        show_row_names = FALSE,
+        show_row_dend = FALSE,
+        show_column_dend = FALSE,
+        clustering_distance_columns = "pearson",
+        row_title = NULL,
+        split = N_CLUSTERS,
+        name='z-score',
+        use_raster = TRUE)
+
+palette(brewer.pal(N_CLUSTERS, "Set2"))
+lapply(names(cluster_annotations), function(c) {
+  decorate_annotation("clusters", slice = c, {
+    grid.rect(x=1, width=unit(2, "mm"), just="right", gp = gpar(fill = c, col=NA))
+    grid.text(cluster_annotations[[c]], just="right", x=unit(45, "mm"), gp=gpar(fontsize=12, lineheight=1))
+  })
+})
+```
+
+Export heatmap as Supp. Figure 1E:
+```{r}
+pdf(file.path(params$paper_figures, "SuppFigure1E.pdf"), width = 8, height = 9, pointsize = 30)
+Heatmap(tpm_mat_scaled, 
+        left_annotation=ha, 
+        cluster_rows=clust_obj,
+        cluster_columns =TRUE,
+        show_row_names = FALSE,
+        show_row_dend = FALSE,
+        show_column_dend = FALSE,
+        clustering_distance_columns = "pearson",
+        row_title = NULL,
+        split = N_CLUSTERS,
+        name='z-score',
+        use_raster = TRUE)
+
+palette(brewer.pal(N_CLUSTERS, "Set2"))
+lapply(names(cluster_annotations), function(c) {
+  decorate_annotation("clusters", slice = c, {
+    grid.rect(x=1, width=unit(2, "mm"), just="right", gp = gpar(fill = c, col=NA))
+    grid.text(cluster_annotations[[c]], just="right", x=unit(45, "mm"), gp=gpar(fontsize=12, lineheight=1))
+  })
+})
+dev.off()
+```
+
+### GSVA with HALLMARK gene sets
+
+Get HALLMARK gene sets from migSigDB (version: 7.5.1):
+```{r}
+h <- msigdbr(species = "Homo sapiens", category = "H") |> dplyr::select(gene_symbol, gs_name) |> unstack()
+``` 
+
+Calculate GSVA for all samples and take mean per organoid:
+```{r HALLMARK heatmap}
+gsva_results <- gsva(data.matrix(prot.wImp), h, kcdf = "Gaussian", parallel.sz = params$maxcores)
+
+heatdata = gsva_results |>
+  as.data.frame() |>
+  rownames_to_column("hallmark") |>
+  pivot_longer(cols=starts_with("CRC"), names_to = "sample") |> 
+  separate("sample", into=c("organoid", "replicate"), extra = "merge") |>
+  group_by(hallmark, organoid) |>
+  dplyr::summarise(value=mean(value)) |>
+  pivot_wider(id_cols="hallmark", names_from="organoid") |>
+  column_to_rownames('hallmark')
+
+heatdata <- t(scale(t(heatdata)))
+
+top_df <- data.frame(row.names = colnames(heatdata))
+top_df$`MSI status` <- clinical$`MSI / MSS (IHC)`[match(rownames(top_df), clinical$`Organoids code`)]
+
+colors$`MSI status` <- colors$msi_status
+top_annotation <- HeatmapAnnotation(df = top_df,show_annotation_name = T,
+                                        name = "MSI status",
+                                        gap = unit(0.5, "mm"),
+                                        border = FALSE,
+                                        annotation_height = unit(3, "mm"),
+                                        annotation_name_gp = gpar(fontsize=12),
+                                        simple_anno_size_adjust = TRUE,
+                                        annotation_name_side = "right",
+                                        show_legend = FALSE,
+                                        col = colors)
+
+
+hm <-  Heatmap(matrix = heatdata,
+               top_annotation = top_annotation,
+               name = "z-score",
+               clustering_distance_columns = "pearson",
+               clustering_distance_rows = "pearson",
+               heatmap_legend_param = list(title_position = "leftcenter-rot", at = c(-3,-2,-1,0,1,2,3),
+                                           title_gp = gpar(fontsize = 18, fontface = "plain"), labels_gp = gpar(fontsize = 15)),
+               show_column_dend = TRUE,
+               show_row_dend = TRUE,
+               column_names_max_height = unit(0.2, "npc"),
+               row_names_max_width = unit(0.45, "npc"),
+               show_heatmap_legend = TRUE,
+               row_names_gp = gpar(fontsize = 12),
+               column_names_gp = gpar(fontsize = 16),
+               cluster_rows = T,
+               cluster_columns = T)
+```
+
+Export as Figure 2C.
+```{r, echo = FALSE}
+pdf(file.path(params$paper_figures, "Figure2C.pdf"), width = 13, height = 13, onefile = TRUE)
+draw(hm, heatmap_legend_side = "left")
+dev.off()
+```
+
+
+### Protein complexes:
+
+```{r}
+#z-score across organoids:
+prot.scaled <- scale(prot.avg)
+
+# Load table from Ori et al., Genome Biology (2016)
+file_protcompl <- "../../tables/protComplexes_13059_2016_912_MOESM2_ESM-1.xlsx"
+prot.compl <- read_excel(file_protcompl, 1)
+
+#select only human protein complexes:
+prot.compl <- prot.compl[which(prot.compl$`Original source species` == "Human"), ]
+
+#get list of ensembl IDs for complexes:
+ensIDs <- as.list(strsplit(prot.compl$`Member identifiers (human Ensembl gene)`, '\\s+'))
+names(ensIDs) <- prot.compl$`Complex ID`
+
+#convert ensembl IDs to gene names:
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+
+prot_list <- vector(mode="list", length=length(ensIDs))
+supp_table <- data.frame(`Complex ID` = character(),
+                         HGNC = character(), 
+                         nProt = integer(),
+                         dProt = character(),
+                         stringsAsFactors = FALSE)
+
+for (i in 1:length(ensIDs)) {
+  name <- names(ensIDs)[i]
+  IDs <- getBM(filters= "ensembl_gene_id", attributes= c("ensembl_gene_id","hgnc_symbol"), values=ensIDs[[i]], mart= mart)
+  values <- prot.avg[rownames(prot.avg) %in% IDs$hgnc_symbol, ]
+  
+  if (! is.null(dim(values)[1]) && dim(values)[1] >= 5) {
+    prot_list[[i]] <- values
+    names(prot_list)[[i]] <- name
+    hgnc <- paste(IDs$hgnc_symbol, collapse=" ")
+    dProt <- paste(rownames(prot.avg)[rownames(prot.avg) %in% IDs$hgnc_symbol], collapse=" ")
+    supp_table[i,] <- cbind(name, hgnc, dim(values)[1], dProt)
+  }
+  else {
+    prot_list[[i]] <- NULL
+    supp_table[i,] <-cbind(name, NA, NA, NA)
+  }
+}
+
+supp_table <- merge(prot.compl, supp_table, by.x = "Complex ID", by.y ="Complex.ID")
+supp_table <- supp_table[! is.na(supp_table$nProt),]
+
+# delete empty entries:
+prot_list <- prot_list[lapply(prot_list,length)>0]
+
+# calculate correlation:
+med_cor_org <- lapply(prot_list, cor, use="na.or.complete")
+med_cor_org <- lapply(med_cor_org, function(x) {diag(x) <- NA; x})
+med_cor_org <- lapply(med_cor_org, median)
+
+med_cor_prot <- lapply(prot_list, t)
+med_cor_prot <- lapply(med_cor_prot, cor, use="na.or.complete")
+med_cor_prot <- lapply(med_cor_prot, function(x) {diag(x) <- NA; x})
+med_cor_prot <- lapply(med_cor_prot, median, na.rm=TRUE)
+```
+
+```{r}
+median.correlation <- as.data.frame(unlist(med_cor_prot))
+median.correlation$`Complex ID` <- rownames(median.correlation)
+names(median.correlation) <- c('median corr', 'Complex ID')
+supp_table <- merge(supp_table, median.correlation, by="Complex ID")
+
+write_tsv(supp_table, file=file.path(params$resultdir, "SuppTable1.txt"))
+```
+
+Visualize correlation in sorted barplot:
+```{r,  fig.height=20, fig.width=15}
+med_cor_prot <- as.data.frame(unlist(med_cor_prot))
+colnames(med_cor_prot)[1] <- "med_cor_prot"
+
+med_cor_prot$complex <- as.character(lapply(rownames(med_cor_prot), function(x) prot.compl$`Complex Name`[x == prot.compl$`Complex ID`]))
+med_cor_prot$complex <- as.factor(med_cor_prot$complex)
+
+p_med <- ggplot(med_cor_prot, aes(x= reorder(complex, med_cor_prot), y= med_cor_prot)) +
+  geom_bar(stat="identity")+
+  theme_minimal()+
+  theme(axis.text.x = element_text(vjust = 0.5, hjust=1), axis.text.y = element_text(size=11), panel.grid.major = element_blank())+
+  ylab("median Pearson's r")+
+  xlab("")
+p_med + coord_flip()
+```
+
+Select 26S Proteasome and plot members as heatmap:
+```{r}
+proteasome26S <- prot_list[[1]]
+proteasome26S <- t(proteasome26S)
+is.na(proteasome26S) <- !proteasome26S
+```
+
+
+Variances of members:
+```{r,  fig.height=2, fig.width=10}
+proteasome26S_variances <- apply(proteasome26S, 2, var, na.rm=TRUE)
+proteasome26S_variances <- sort(proteasome26S_variances)
+proteasome26S_variances <- as.data.frame(proteasome26S_variances)
+proteasome26S_variances$subunit <- rownames(proteasome26S_variances)
+names(proteasome26S_variances)[1] <- "variance"
+
+proteasome26S_variances$subunit <- factor(proteasome26S_variances$subunit, levels=unique(as.character(proteasome26S_variances$subunit)) )
+
+# add information about immuno- and constitutive proteasome to dataframe:
+proteasome26S_variances$group <- rep('other sub-complex', dim(proteasome26S_variances)[1])
+constitutiveproteasome = c('PSMB7', 'PSMB6', 'PSMB5')
+immunoproteasome = c('PSMB8', 'PSMB9', 'PSMB10')
+proteasome26S_variances$group[proteasome26S_variances$subunit %in% immunoproteasome] <- 'immunoproteasome'
+proteasome26S_variances$group[proteasome26S_variances$subunit %in% constitutiveproteasome] <- 'constitutive proteasome'
+proteasome26S_variances$group <- as.factor(proteasome26S_variances$group)
+
+p <- ggplot(proteasome26S_variances, aes(x=subunit, y=variance, fill=group)) +
+  geom_bar(stat="identity")+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), text = element_text(size=30), panel.grid.major=element_blank(), panel.grid.minor=element_blank())+
+  xlab("26S Proteasome subunits")
+
+pdf(file.path(params$paper_figures, "Figure2F.pdf"), width = 20, height = 5, pointsize = 30)
+p
+dev.off()
+```
+
+Check protein expression level of PSMB8, PSMB9 and PSMB10 compared to all other proteins:
+```{r,  fig.height=2.5, fig.width=8}
+prot_16Ssubset <- prot.scaled[rownames(prot.scaled) %in% c('PSMB8', 'PSMB9', 'PSMB10'),]
+hS1F <- Heatmap(prot_16Ssubset, cluster_rows = FALSE, name='z-score', show_column_dend = FALSE,
+                heatmap_legend_param = list( labels_gp= gpar(fontsize=23), title_gp = gpar(fontsize=23)),
+                column_names_gp = gpar(fontsize=30),
+                row_names_gp = gpar(fontsize=30))
+```
+
+Export heatmap as SuppFigure 1F:
+```{r}
+pdf(file.path(params$paper_figures, "SuppFigure1F.pdf"), width = 20, height = 5, pointsize = 30)
+draw(hS1F)
+dev.off()
+```

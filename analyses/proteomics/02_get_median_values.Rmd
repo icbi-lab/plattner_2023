@@ -1,0 +1,44 @@
+---
+title: "Calculate median values from replicates"
+author: "chripla"
+date: "`r Sys.Date()`"
+output: html_document
+params:
+  inputdir: "../../data/proteomics"
+  resultdir: "../../results"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo = FALSE}
+library(readr)
+library(dplyr)
+library(tidyr)
+```
+
+This code snippet calculates the median-average values for imputed and not-imputed proteomic replicates.
+```{r}
+proteindata = read_tsv(file.path(params$inputdir, "protein_level_baseline_woImp.txt")) |>
+  pivot_longer(cols=starts_with("CRC"), names_to = "sample") |> 
+  separate("sample", into=c("organoid", "replicate"), extra = "merge") |>
+  group_by(Protein, organoid) |>
+  summarise(value=median(value)) |>
+  pivot_wider(id_cols="Protein", names_from="organoid")
+
+proteindata_imputed = read_tsv(file.path(params$inputdir, "protein_level_baseline_wImp.txt")) |>
+  pivot_longer(cols=starts_with("CRC"), names_to = "sample") |> 
+  separate("sample", into=c("organoid", "replicate"), extra = "merge") |>
+  group_by(Protein, organoid) |>
+  summarise(value=median(value)) |>
+  pivot_wider(id_cols="Protein", names_from="organoid")
+
+prot_to_gene_name <- read_tsv("../../tables/prot_to_gene_name.tsv")
+
+prot.avg.wImp = proteindata_imputed |> left_join(prot_to_gene_name)
+prot.avg.woImp = proteindata |> left_join(prot_to_gene_name)
+
+write_tsv(prot.avg.wImp, file.path(params$resultdir, "protein_level_baseline_wImp_averaged.txt"))
+write_tsv(prot.avg.woImp, file.path(params$resultdir, "protein_level_baseline_woImp_averaged.txt"))
+```
