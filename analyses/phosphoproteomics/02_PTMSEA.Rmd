@@ -1,0 +1,458 @@
+---
+title: "02_PTMSEA"
+author: "Alexander Kirchmair"
+params:
+  data: ../../data
+  resultsdir: ../../results
+  tables: ../../tables
+  figures: ../../results/figures
+  SIGNOR: ../../tables/SIGNOR_all_data_23_04_21.tsv
+  libdir: ../../lib
+  nperm:  100000
+  ssGSEA: ../../lib/ssGSEA2.0
+  PTMSEA: ../../lib/PTMSEA.R
+  PTMSEAgmt.uniprot:  ../../lib/ssGSEA2.0/db/ptmsigdb/ptm.sig.db.all.uniprot.human.v1.9.0.gmt
+  sgecores: 52
+---
+
+
+```{r setup, include=FALSE}
+
+library(conflicted)
+library(ggplot2)
+library(igraph)
+library(tidygraph)
+library(ggraph)
+library(reshape2)
+library(cmapR)
+library(ComplexHeatmap)
+library(R.utils)
+library(ggvenn)
+library(patchwork)
+library(circlize)
+library(dplyr)
+library(magrittr)
+library(dendsort)
+library(cowplot)
+library(BiocParallel)
+library(graphlayouts)
+library(pacman)
+library(matrixStats)
+
+if (!dir.exists(params$resultsdir)){ dir.create(params$resultsdir) }
+if (!dir.exists(params$figures)){ dir.create(params$figures) }
+if (!dir.exists(file.path(params$resultsdir, "PTMSEA"))) dir.create(file.path(params$resultsdir, "PTMSEA"))
+conflict_prefer("select", "dplyr")
+
+source(file.path(params$libdir, "phosphoproteomics_functions.R"))
+source(file.path(params$libdir, "global_params.R"))
+
+for (p in 1:length(params)){ do.call('Sys.setenv', params[p]) }
+
+```
+
+
+```{r Import mapDIA results}
+
+phosphodata <- readRDS(file.path(params$resultsdir, "01_phosphodata.rds"))
+
+```
+
+
+
+### PTM-SEA ----
+
+
+
+```{bash PTM-SEA, engine.opts = '-l'}
+
+ptmseaR=$(readlink -f $PTMSEA)
+ssgsea=$(readlink -f $ssGSEA)
+
+if [ ! -d $ssGSEA ]; then
+  git clone https://github.com/broadinstitute/ssGSEA2.0.git $ssGSEA
+fi
+
+```
+
+
+
+```{r PTM-SEA preprocessing: Phosphodata input scores}
+
+scores <- phosphodata %>% with(-log10(prot.fdr) * sign(prot.lfc))
+scoreann <- phosphodata$annotation %>% subset(select)
+meandata <- scoreann %>% with(mean[match(rownames(scores), psite_name_protein)]) %>% setNames(., rownames(scores))
+rownames(scores) %<>% expandPsites()
+
+scores %<>% rowDemultiplex(., meandata, sep = ";") %>%
+  rowDemultiplex(., setNames(meandata, expandPsites(names(meandata))), sep = "|")
+
+scores %<>% replaceInf()
+rownames(scores) %<>% gsub(pattern = "_", replacement = ";", x = paste0(., "-p") )
+
+inputGCT <- new("GCT", mat = scores)
+cmapR::write_gct(ds = inputGCT, ofile = file.path(params$resultsdir, "PTMSEA", "input_uniprot.gct"), appenddim = FALSE, precision = 8)
+
+```
+
+
+```{r PTM-SEA preprocessing: PTM-sets from PTM-SigDB}
+
+ptmsigdb_all <- parse_gmt(fname = params$PTMSEAgmt.uniprot)
+ptmsigdb <- ptmsigdb_all[ -grep(pattern = "DISEASE-PSP", names(ptmsigdb_all)) ]
+ptmsigdb_kinases <- ptmsigdb_all[ grep(pattern = "kinase", names(ptmsigdb_all), ignore.case = TRUE) ]
+
+# filter for sets with measured sites
+ptmsigdb_measured <- ptmsigdb %L>% function(tmpset){
+  tmpset$entry <- tmpset$entry[sub("[;u]+$|[;d]+$", "", tmpset$entry) %in% rownames(scores)]
+  tmpset$desc <- ""
+  tmpset$len <- length(tmpset$entry)
+  tmpset
+}
+ptmsigdb_measured <- ptmsigdb_measured[sapply(ptmsigdb_measured, "[[", "len") > 1]
+
+# collapse duplicates
+names(ptmsigdb_measured) <- paste0(names(ptmsigdb_measured), " (PTMSigDB)")
+ptmsigdb_measured <- collapseSets(ptmsigdb_measured, i = "entry")
+
+```
+
+
+
+```{r PTM-SEA preprocessing: PTM-sets from SIGNOR}
+
+signordb <- read.csv(params$SIGNOR, sep = "\t", stringsAsFactors = FALSE)
+signordb$RESIDUE <- signordb %>% pull(RESIDUE) %>% sub("Ser", "S", .) %>% sub("Thr", "T", .) %>% sub("Tyr", "Y", .)
+signordb %<>% subset(DIRECT == "YES" & RESIDUE != "" & MECHANISM %in% c("phosphorylation", "dephosphorylation"))
+
+signordb$updown <- NA
+signordb$updown[signordb$MECHANISM == "phosphorylation"] <- "u"
+signordb$updown[signordb$MECHANISM == "dephosphorylation"] <- "d"
+
+ptmsets <- setNames(unique(signordb$ENTITYA), unique(signordb$ENTITYA)) %L>% function(tmpnode){
+  tmpdata <- subset(signordb, ENTITYA == tmpnode)
+  entry <- unique(paste0(tmpdata$IDB, ";", tmpdata$RESIDUE, "-p;", tmpdata$updown))
+  list("head" = tmpnode, "desc" = "", "entry" = entry, "len" = length(entry))
+}
+
+# filter for sets with measured sites
+ptmsets_measured <- ptmsets %L>% function(tmpset){
+  tmpset$entry <- tmpset$entry[sub("[;u]+$|[;d]+$", "", tmpset$entry) %in% rownames(scores)]
+  tmpset$len <- length(tmpset$entry)
+  tmpset
+}
+ptmsets_measured <- ptmsets_measured[sapply(ptmsets_measured, "[[", "len") > 1]
+
+# collapse duplicates
+names(ptmsets_measured) <- paste0(names(ptmsets_measured), " (SIGNOR)")
+ptmsets_measured <- collapseSets(ptmsets_measured, i = "entry")
+
+```
+
+```{r PTM-SEA preprocessing: Combine signatures}
+combined_sets <- collapseSets(c(ptmsigdb_measured, ptmsets_measured), i = "entry")
+
+combined_sets <- names(combined_sets) %L>% function(tmp){
+  combined_sets[[tmp]]$head <- tmp
+  combined_sets[[tmp]]$desc <- tmp
+  combined_sets[[tmp]]
+}
+
+write_gmt(combined_sets, fname = file.path(params$resultsdir, "PTMSEA", "ptmsets_combined.gmt"))
+```
+
+
+```{r PTM-SEA preprocessing: Compare SIGNOR and PTMSigDB}
+
+# all signatures
+SIGNOR_sites <- sapply(ptmsets, "[[", "entry") %>% unlist() %>% sub("[;u]+$|[;d]+$", "", .) %>% unique()
+ptmsigdb_sites <- ptmsigdb_all %>% sapply(., "[[", "entry") %>% unlist() %>% sub("[;u]+$|[;d]+$", "", .) %>% unique()
+
+gg1 <- ggvenn::ggvenn(list(SIGNOR = SIGNOR_sites, PTMsigdb = ptmsigdb_sites), stroke_color = NA, fill_color = c(rgb(0.3,0.4,1), rgb(1,0.95,0))) + 
+  theme(plot.title = element_text(hjust=0.5)) +
+  ggtitle("phosphosites (all signatures)")
+
+gg2 <- ggvenn::ggvenn(list(SIGNOR = SIGNOR_sites, PTMsigdb = ptmsigdb_sites, measured = rownames(scores)), stroke_color = NA,
+               fill_color = c(rgb(0.3,0.4,1), rgb(1,0.95,0), rgb(0.2,1,0.3))) + 
+  theme(plot.title = element_text(hjust=0.5)) +
+  ggtitle("phosphosites (all signatures)")
+
+# kinase signatures
+SIGNOR_sites <- sapply(ptmsets, "[[", "entry") %>% unlist() %>% sub("[;u]+$|[;d]+$", "", .) %>% unique()
+ptmsigdb_sites <- ptmsigdb_kinases %>% sapply(., "[[", "entry") %>% unlist() %>% sub("[;u]+$|[;d]+$", "", .) %>% unique()
+
+gg3 <- ggvenn::ggvenn(list(SIGNOR = SIGNOR_sites, PTMsigdb = ptmsigdb_sites), stroke_color = NA, fill_color = c(rgb(0.3,0.4,1), rgb(1,0.95,0))) + 
+  theme(plot.title = element_text(hjust=0.5)) +
+  ggtitle("phosphosites (kinase signatures)")
+
+gg4 <- ggvenn::ggvenn(list(SIGNOR = SIGNOR_sites, PTMsigdb = ptmsigdb_sites, measured = rownames(scores)), stroke_color = NA,
+               fill_color = c(rgb(0.3,0.4,1), rgb(1,0.95,0), rgb(0.2,1,0.3))) + 
+  theme(plot.title = element_text(hjust=0.5)) +
+  ggtitle("phosphosites (kinase signatures)")
+
+
+ggptm <- (gg1 / gg2) | (gg3 / gg4)
+ggptm
+
+```
+
+
+
+
+Run PTM-SEA for pval-scored input data
+```{bash PTM-SEA, engine.opts = '-l'}
+
+ptmseaR=$(readlink -f $PTMSEA)
+ssgsea=$(readlink -f $ssGSEA)
+
+cd $resultsdir/PTMSEA
+
+qsub -pe smp $sgecores $ptmseaR \
+  --script $ssgsea \
+  --input input_uniprot.gct \
+  --db ptmsets_combined.gmt \
+  --ouptut ptmsea \
+  --test area.under.RES \
+  --weight 1 \
+  --norm none \
+  --score NES \
+  --perm $nperm \
+  --extendedoutput TRUE \
+  --minoverlap 2 \
+  --export TRUE \
+  --globalfdr TRUE \
+  --sparecores $(($(nproc --all)-sgecores))
+
+while qstat | grep -q -w PTMSEA; do
+  sleep 3
+done
+
+```
+
+```{bash PTM-SEA local, engine.opts = '-l'}
+
+# ptmseaR=$(readlink -f $PTMSEA)
+# ssgsea=$(readlink -f $ssGSEA)
+
+# cd $resultsdir/PTMSEA
+
+# Rscript $ptmseaR \
+#   --script $ssgsea \
+#   --input input_uniprot.gct \
+#   --db ptmsets_combined.gmt \
+#   --ouptut ptmsea \
+#   --test area.under.RES \
+#   --weight 1 \
+#   --norm none \
+#   --score NES \
+#   --perm $nperm \
+#   --extendedoutput TRUE \
+#   --minoverlap 2 \
+#   --export TRUE \
+#   --globalfdr TRUE \
+#   --sparecores $(($(nproc --all)-sgecores))
+
+```
+
+
+```{r PTM-SEA results: import}
+
+PTMSEAresults <- c("NES" = "ptmsea-scores.gct", "pval" = "ptmsea-pvalues.gct", "FDR" = "ptmsea-fdr-pvalues.gct") %L>%
+  function(file){ mat(parse_gctx(fname = file.path(params$results, "PTMSEA", file))) }
+
+metares <- meta(parse_gctx(fname = file.path(params$resultsdir, "PTMSEA", "ptmsea-scores.gct")))
+
+metares.sites <- metares[,grep("Signature.set.overlap.", colnames(metares))]
+metares.sites <- metares.sites[,-grep("percent.", colnames(metares.sites))]
+siglist <- lapply(1:nrow(metares.sites), function(i){
+  lapply(metares.sites[i,], function(tmp) strsplit(tmp, split = "|", fixed = TRUE)[[1]] )
+})
+names(siglist) <- rownames(metares.sites)
+
+used_sites <- sapply(siglist, function(tmplist){
+  res <- unique(unlist(tmplist))
+  res <- res[!is.na(res)]
+  paste(res, collapse = "|")
+})
+
+PTMSEAresults$signatures <- data.frame(row.names = names(used_sites), "signatures" = names(used_sites), "sites" = used_sites)
+writeTables(PTMSEAresults, file.path(params$resultsdir, "PTMSEA", "PTMSEA_results.xlsx"), rownames = c(T,T,T,F))
+saveRDS(object = PTMSEAresults, file = file.path(params$resultsdir, "PTMSEA", "PTMSEAresults.rds"), compress = "gzip")
+
+```
+
+```{r PTM-SEA: kinases}
+
+# Mutations
+mutationdata <- importMutationdata(file.path(params$data, "exomeseq", "SomaticVariant_summarytable_allVars.tsv"))
+
+res <- PTMSEAresults %>% ptmsigdb2kinase(ids = base::union(signor$ENTITYA, signor$ENTITYB))
+res <- res %L>% function(tmp){ tmp[res$kinases$n > 5 & rowAnys(res$FDR <= 0.01, na.rm = TRUE), ] }
+kinasedata <- res %>% magrittr::extract(c("NES", "FDR")) %L>% rowDemultiplex()
+
+pval_mat <- kinasedata$FDR
+pval_mat[is.na(pval_mat)] <- 1
+
+NES <- kinasedata$NES
+mut_mat <- mutationdata[sub("_.*", "", colnames(NES))] %>% sapply(., function(tmp) rownames(NES) %in% tmp )
+
+signiFUN <- function(j, i, x, y, width, height, fill){
+  if (pval_mat[i,j] <= 0.05 & !mut_mat[i,j]){ grid.points(x, y, gp = gpar(col = rgb(0,0,0,0.8)), pch = 1, size = unit(4, "pt"))}
+  if (pval_mat[i,j] > 0.05 & mut_mat[i,j]){ grid.points(x, y, gp = gpar(col = rgb(0,0,0,0.8)), pch = 0, size = unit(4, "pt"))}
+  if (pval_mat[i,j] <= 0.05 & mut_mat[i,j]){ grid.points(x, y, gp = gpar(col = rgb(0,0,0,0.8)), pch = 15, size = unit(4, "pt"))}
+}
+
+lgd <- Legend(labels = c("signif", "mut", "signif&mut"), type = "points", pch = c(1,0,15),
+              legend_gp = gpar(fill = "black", fontsize = 20), title = "status", background = "white")
+
+cldata <- kinasedata$NES
+cldata[is.na(cldata)] <- 0
+rowcl <- hclust(dist(cldata))
+colcl <- hclust(dist(t(cldata)))
+
+kinnames <- with(res$kinases, paste0(ID, " (", DB, ", n=", n, ")"))
+
+fontsize <- 11
+topann <- HeatmapAnnotation(df = data.frame(organoid = gsub("_.*", "", colnames(NES)), treatment = gsub(".*_", "", colnames(NES))),
+                           annotation_height = unit(20, "points"),
+                           gap = unit(0, "cm"),
+                           border = FALSE,
+                           annotation_name_gp = gpar(fontsize = fontsize, fontface = "bold"),
+                           simple_anno_size_adjust = TRUE,
+                           annotation_name_side = "left",
+                           col = colors,
+                           show_legend = FALSE)
+
+hm <- ComplexHeatmap::Heatmap(matrix = NES,
+                              col = colorRamp2(c(-4,0,4), c("blue", "white", "red")),
+                              top_annotation = topann,
+                              row_names_gp = gpar(fontsize = fontsize),
+                              column_names_gp = gpar(fontsize = fontsize),
+                              cell_fun = signiFUN,
+                              name = "NES",
+                              column_split = sub("_.*", "", colnames(NES)),
+                              na_col = "white",
+                              cluster_rows = rowcl)
+
+pdf(file = file.path(params$figures, "Fig3c.pdf"), onefile = TRUE, width = 12, height = 7)
+  ComplexHeatmap::draw(hm, annotation_legend_list  = list(lgd))
+dev.off()
+
+```
+
+
+
+
+```{r PTM-SEA: pathways}
+
+heatpal <- colorRamp2( c(-4,0,4), c("blue", "white", "red"))
+
+FDR <- PTMSEAresults$FDR %>% subset(grepl("PATH-", rownames(.)))
+NES <- PTMSEAresults$NES[rownames(FDR),]
+
+rownames(NES) <- strsplit(rownames(NES), split = "/", fixed = TRUE) %>%
+  sapply(., function(tmp) tmp[grep("PATH-", tmp)]) %L>%
+  paste(collapse = "/") %>% simplify2array()
+rownames(NES) <- paste0(rownames(NES), " (", metares[rownames(FDR),]$Signature.set.size, ")")
+
+pval_mat <- FDR
+pval_mat[is.na(pval_mat)] <- 1
+signiFUN <- function(j, i, x, y, width, height, fill){
+  if (pval_mat[i,j] <= 0.05){ grid.points(x, y, gp = gpar(col = rgb(0,0,0,0.8)), pch = 19, size = unit(2.5, "pt"))}
+}
+
+topann <- HeatmapAnnotation(df = data.frame(organoid = gsub("_.*", "", colnames(NES)), treatment = gsub(".*_", "", colnames(NES))),
+                           annotation_height = unit(20, "points"),
+                           gap = unit(0, "cm"),
+                           border = FALSE,
+                           annotation_name_gp = gpar(fontsize = 11, fontface = "bold"),
+                           simple_anno_size_adjust = TRUE,
+                           annotation_name_side = "left",
+                           col = colors,
+                           show_legend = FALSE)
+
+tmp <- NES[rowSums(pval_mat <= 0.05) > 0,]
+pval_mat <- pval_mat[rowSums(pval_mat <= 0.05) > 0,]
+cldata <- tmp
+cldata[is.na(cldata)] <- 0
+rowcl <- hclust(dist(cldata))
+rownames(tmp) <- cutNames(rownames(tmp), maxchar = 50)
+h_crc2 <- ComplexHeatmap::Heatmap(matrix = tmp,
+                                  top_annotation = topann,
+                                 row_names_gp = gpar(fontsize = 7),row_names_max_width = unit(0.3,"npc"),
+                                 #column_names_gp = gpar(fontsize = 7),
+                                 cell_fun = signiFUN,
+                                 name = "NES",
+                                 column_split = sub("_.*", "", colnames(NES)),
+                                 na_col = "white",
+                                 cluster_rows = rowcl)
+
+lgd <- Legend(labels = c("signif"), type = "points", pch = 19,
+              legend_gp = gpar(fill = "black", fontsize = 20), title = "status", background = "white")
+
+pdf(file = file.path(params$figures, "Fig3d.pdf"), width = 12, height = 7, bg = "white")
+  ComplexHeatmap::draw(h_crc2, annotation_legend_list  = list(lgd))
+dev.off()
+
+
+```
+
+
+
+
+```{r Volcano plots}
+
+# SIGNOR network
+signor <- read.csv(file.path(params$SIGNOR), sep = "\t", stringsAsFactors = FALSE)
+signor %<>% subset(TAX_ID %in% c(9606, -1)) %>% subset(TYPEA == "protein" & TYPEB == "protein") %>% signor2net()
+signor %<>% mutate(EFFECT = gsub("binding", "unknown", EFFECT))
+
+kinasedata <- PTMSEAresults %>%
+  ptmsigdb2kinase(ids = base::union(signor$ENTITYA, signor$ENTITYB)) %>%
+  magrittr::extract(c("NES", "FDR")) %L>% rowDemultiplex()
+
+kdf1 <- melt(kinasedata$NES, value.name = "NES", varnames = c("kinase", "sample"))
+kdf2 <- melt(kinasedata$FDR, value.name = "FDR", varnames = c("kinase", "sample"))
+kdf <- full_join(kdf1, kdf2)
+kdf$CRC <- sub("_.*", "", kdf$sample)
+kdf$CRC <- factor(kdf$CRC, ordered = TRUE)
+kdf$TRT <- sub(".*_", "", kdf$sample)
+kdf$TRT <- factor(kdf$TRT, ordered = TRUE)
+
+kdf <- subset(kdf, TRT != "TNFalpha")
+kdf$label <- as.character(kdf$kinase)
+kdf <- ((unique(kdf$CRC) %L>% function(crc){ subset(kdf, CRC == crc)}) %L>% function(x){
+  x <- x[order(abs(x$NES), decreasing = TRUE),]
+  x <- x[order(abs(x$FDR), decreasing = FALSE),]
+  x$label[-c(1:6)] <- ""; x}) %>% Reduce(f = rbind)
+kdf$treatment <- kdf$TRT
+
+gg <- ggvolcano(kdf, label = label, shape = treatment, box.padding = 0.6, lwd = 0.6, nbreaks_y = 4, repel = 5,
+                lab_size = 11, title_size = 18, leg_size = 18, axis_size = 17, nlabels = Inf, expand = c(0.15, 0.22)) +
+  theme(panel.grid.major = element_blank(),
+        axis.title = element_text(face = "plain"),
+        strip.text = element_text(size = 18),
+        panel.spacing = unit(-0.04, "lines"),
+        panel.border = element_rect(colour = "black", fill = NA, size = 0.9)) +
+  guides(color = guide_legend(override.aes = list(size = 5), title = "DE"),
+         shape = guide_legend(override.aes = list(size = 5))) + 
+  facet_wrap(~ CRC, nrow = 3) + coord_cartesian(clip = "on")
+
+ggsave(gg, filename = file.path(params$figures, "SuppFig2d.pdf"), device = "pdf", width = 9, height = 10)
+
+```
+
+
+```{r}
+
+write.csv(kinasedata$NES, file = file.path(params$resultsdir, "PTMSEA", "NES_table.csv"))
+
+```
+
+
+```{r}
+
+saveRDS(phosphodata, file.path(params$resultsdir, "02_phosphodata.rds"))
+
+```
+

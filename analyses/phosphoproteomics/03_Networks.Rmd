@@ -1,0 +1,332 @@
+---
+title: "03_Networks"
+author: "Alexander Kirchmair"
+params:
+  data: ../../data
+  resultsdir: ../../results
+  figures: ../../results/figures
+  SIGNOR: ../../tables/SIGNOR_all_data_23_04_21.tsv
+  libdir: ../../lib
+  PTMSEA:  ../../results/PTMSEA
+---
+
+
+```{r setup, include=FALSE}
+
+library(ggplot2)
+library(igraph)
+library(tidygraph)
+library(ggraph)
+library(scatterpie)
+library(reshape2)
+library(ggrepel)
+library(ComplexHeatmap)
+library(circlize)
+library(dplyr)
+library(magrittr)
+library(cowplot)
+library(BiocParallel)
+library(graphlayouts)
+library(matrixStats)
+library(conflicted)
+
+conflict_prefer("desc", "dplyr")
+conflict_prefer("neighborhood", "igraph")
+conflict_prefer("degree", "igraph")
+conflict_prefer("select", "dplyr")
+conflict_prefer("draw", "ComplexHeatmap")
+conflict_prefer("union", "igraph")
+conflict_prefer("parLapply", "parallel")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("exprs", "rlang")
+conflict_prefer("active", "tidygraph")
+
+if (!dir.exists(params$results)) dir.create(params$results)
+if (!dir.exists(params$figures)){ dir.create(params$figures) }
+
+source(file.path(params$libdir, "phosphoproteomics_functions.R"))
+source(file.path(params$libdir, "global_params.R"))
+
+```
+
+
+
+### Data import and graph annotation ----
+
+```{r}
+
+phosphodata <- readRDS(file.path(params$resultsdir, "02_phosphodata.rds"))
+
+```
+
+
+```{r Data}
+
+# SIGNOR network
+signor <- read.csv(file.path(params$SIGNOR), sep = "\t", stringsAsFactors = FALSE)
+signor %<>% subset(TAX_ID %in% c(9606, -1)) %>% subset(TYPEA == "protein" & TYPEB == "protein") %>% signor2net()
+signor %<>% mutate(EFFECT = gsub("binding", "unknown", EFFECT))
+
+# Base graph
+ndf <- data.frame(name = unique(c(signor$from, signor$to)), type = NA)
+IG <- graph_from_data_frame(signor, directed = TRUE, vertices = ndf)
+
+# Kinase activities
+PTMSEAresults <- readRDS(file = file.path(params$PTMSEA, "PTMSEAresults.rds"))
+kinasedata <- PTMSEAresults %>% ptmsigdb2kinase(ids = V(IG)$name) %>% magrittr::extract(c("NES", "FDR")) %L>% rowDemultiplex()
+
+# Mutations
+mutationdata <- importMutationdata(file.path(params$data, "exomeseq", "SomaticVariant_summarytable_allVars.tsv"))
+
+# Protein phosphorylation data
+rownames(phosphodata$lfc) <- ((rownames(phosphodata$lfc) %>% strsplit(split = ";")) %L>% function(x){x[!grepl("_NA",x) & grepl("_",x)]}) %S>% paste0(collapse = ";")
+rownames(phosphodata$fdr) <- rownames(phosphodata$lfc)
+phosphodata$lfc %<>% rowDemultiplex(sep = ";")
+phosphodata$fdr %<>% rowDemultiplex(sep = ";")
+
+```
+
+
+```{r}
+
+writeTables(list(NES=kinasedata$NES),file = file.path(params$results,"ST2kinases.xlsx"))
+
+```
+
+
+```{r Annotated graph}
+
+IG$design <- data.frame(row.names = colnames(kinasedata$NES), sample = colnames(kinasedata$NES))
+IG$design %<>% mutate(CRC = sub("_.*", "", sample),
+                      TRT = sub(".*_", "", sample))
+
+# Kinase activities
+IG %<>% setdata(kinaseNES = kinasedata$NES) %>%
+  setdata(kinaseFDR = kinasedata$FDR)
+
+# Mutations
+mdf <- (mutationdata %L>% function(tmp){ names(tmp)[match(V(IG)$name, tmp)] }) %>% as.data.frame(row.names = V(IG)$name)
+mdf[is.na(mdf)] <- ""
+mdf <- mdf[,IG$design$CRC]
+colnames(mdf) <- rownames(IG$design)
+IG %<>% setdata(mutation = mdf) %>%
+  setdata(mutated = mdf != "")
+
+# Protein phosphorylation data
+phospho_lfc <- matchdf(phosphodata$lfc, E(IG)$PSITE_NAME)
+rownames(phospho_lfc) <- E(IG)$ID
+phospho_fdr <- matchdf(phosphodata$fdr, E(IG)$PSITE_NAME)
+rownames(phospho_fdr) <- E(IG)$ID
+IG %<>% setdata(phosphoLFC = phospho_lfc, type = "edges") %>%
+  setdata(phosphoFDR = phospho_fdr, type = "edges")
+
+SGL <- list() # subgraph list
+SGL$IG <- IG
+
+```
+
+
+
+### Perturbation subgraph extraction ----
+Identify subgraphs of perturbed nodes and edges for each perturbation.
+
+```{r Subnetwork extraction}
+
+SGL$perturbation.subgraphs <- IG$design$sample %L>% function(tmpsample){
+  
+  SG <- select(.data = as_tbl_graph(IG), sample == tmpsample) %>%
+    activate(nodes) %>% mutate(DE = naf(kinaseFDR <= 0.05), mutated = naf(mutated)) %>%
+    activate(edges) %>% mutate(DE = naf(phosphoFDR <= 0.05), weight = phosphoFDR) %>%
+    subnet(nodes = DE, edges = DE, max_edges = 2, edge_order = Inf) %>%
+    simplifySubnet() %>%
+    lcc() %>%
+    addLayout(., layout_remove_overlaps(layout = layout_with_stress(.), label_width = 0.13, label_heigth = 0.08))
+
+  return(SG)
+}
+
+# adjust layouts
+SGL$perturbation.subgraphs <- SGL$perturbation.subgraphs %L>% function(g){
+  V(g)$x <- V(g)$x - min(V(g)$x) - diff(range(V(g)$x))*0.5
+  V(g)$y <- V(g)$y - min(V(g)$y) - diff(range(V(g)$y))*0.5
+  g
+}
+
+```
+
+
+### Union networks ----
+
+```{r CRC unions}
+
+mut_color <- rgb(0.3, 0.3, 0.3)
+title_size <- 19
+axis_textsize <- 14
+axis_labsize <- 19
+point_label_size <- 12
+node_label_size <- 12
+legend_title_size <- 14
+legend_text_size <- 14
+
+# inhibitors only
+SGL$crc.graphs <- SGL$perturbation.subgraphs[-grep("TNFa", names(SGL$perturbation.subgraphs))] %>% unionNet(SGL$IG, ~ CRC)
+SGL$crc.graphs <- SGL$crc.graphs %L>% function(tmp){ set_vertex_attr(tmp, "subgraphs", value = rowSums(getdata(tmp, "SUBGRAPHS"))) }
+SGL$crc.graphs <- SGL$crc.graphs %L>% function(tmp){ set_vertex_attr(tmp, "mutated", value = rowAnys(getdata(tmp, "mutated"))) }
+
+SGL$crc.graphs <- SGL$crc.graphs %L>% as_tbl_graph() %L>%
+  mutate(degree = centrality_degree(mode = "all"), betweenness = centrality_betweenness(weights = NA), eigen = centrality_eigen(weights = NA))
+
+```
+
+
+```{r CRC unions - plots}
+mut_color <- rgb(0.3, 0.3, 0.3)
+title_size <- 19
+axis_textsize <- 14
+axis_labsize <- 19
+point_label_size <- 12
+node_label_size <- 12
+legend_title_size <- 14
+legend_text_size <- 14
+
+SGL$crc.graphs <- SGL$crc.graphs %L>% mutate(xscore = as.numeric(scale(degree)), yscore = as.numeric(scale(log10(eigen+1))))
+SGL$crc.graphs <- SGL$crc.graphs %L>% mutate(labscore = xscore* yscore)
+SGL$crc.graphs <- SGL$crc.graphs %L>% mutate(labscore = labscore , label = "",
+                                             mutation = ifelse(mutated, "mutated", "not mutated"))
+
+ggg <- SGL$crc.graphs %L>% ggnet(node_mapping = aes(color = mutation, fill = mutation, shape = mutation),
+                                 label_mapping = aes(label = label),
+                                 arrow_mapping = aes(angle = EFFECT),
+                                 angle = angle, edge_geom = geom_edge_arc, edge_color = rgb(0.63, 0.63, 0.63), edge_endgap = 1.8,
+                                 node_labsize = node_label_size/ggplot2::.pt, node_size = 2, strength = 0.1)
+
+ggg %<L>% function(g){ g + scale_color_manual("node type", values = c("mutated" = mut_color, "not mutated" = rgb(0.3, 0.3, 0.3))) +
+                           scale_fill_manual("node type", values = c("mutated" = "white", "not mutated" = "white")) +
+                           scale_shape_manual("node type", values = c("mutated" = 15, "not mutated" = 21)) +
+                           coord_cartesian(clip = "off") +
+                            theme(legend.key.height = unit(1, 'cm'),
+                                  legend.key.width = unit(1.5, 'cm'),
+                                  plot.background = element_blank(),
+                                  #plot.margin = margin(0, 0, 0, 0, unit = "npc"),
+                                  legend.title = element_blank(),
+                                  legend.text = element_text(size = legend_text_size)) +
+                            guides(shape = guide_legend(override.aes = list(size = 5)))}
+
+gg_net <- lapply(ggg, function(gg){ gg + theme(legend.position = "none", plot.margin = margin(0.1, 0, 0.05, 0, unit = "npc"))})
+gg_net <- plot_grid(plotlist = gg_net, nrow = 2, labels = names(gg_net), label_size = title_size, label_fontface = "plain",
+                    label_x = 0.5, hjust = 0.5)
+
+ggsave(gg_net, filename = file.path(params$figures, "Fig4a.pdf"), device = "pdf", width = 12, height = 8)
+
+```
+
+
+```{r CRC unions - nodes plots}
+
+point_label_size <- 12
+mut_color <- rgb(0.3, 0.3, 1)
+ggdf <- SGL$crc.graphs %L>% as_tbl_graph() %L>% as.data.frame()
+ggdf <- (names(ggdf) %L>% function(tmp){ ggdf[[tmp]]$sample <- tmp;  ggdf[[tmp]] }) %>% Reduce(f = rbind)
+ggdf <- ggdf[,-grep("DATA", colnames(ggdf))]
+ggdf$label <- ggdf$name
+
+ggdf_split <- split(ggdf, ggdf$sample) %L>% function(ggd){
+  ggd$label[!ggd$label %in% ggd$name[order(ggd$labscore, decreasing = TRUE)[1:6]]] <- ""
+  ggd %>% arrange((labscore)) }
+ggdf <- ggdf_split %>% Reduce(f = rbind)
+
+gg_nodes <- ggplot(ggdf, aes(x = degree, y = log10(eigen+1), label = label, color = subgraphs, shape = mutated)) + 
+      theme_bw(base_size = 20) +
+      theme(axis.text = element_text(color = "black", size = axis_textsize),
+            axis.ticks = element_line(color = "black", size = 0.6),
+            panel.grid.minor = element_blank(), panel.grid.major = element_blank(),
+            panel.border = element_rect(colour = "black", fill = NA, size = 0.6),
+            panel.spacing = unit(-0.025, "lines"),
+            axis.title = element_text(size = axis_labsize, face = "plain"),
+            strip.text.x = element_text(size = title_size, hjust = 0.5),
+            #plot.margin = margin(0, 0, 0, -0.02, unit = "npc"),
+            strip.background = element_blank(), strip.text = element_text(size = 20)) +
+      geom_point(size = 3) + 
+      geom_text_repel(size = point_label_size/ggplot2::.pt,
+                      seed = 123, max.iter = 10^5, max.overlaps = 50, color = "black", min.segment.length = 0.05) +
+      facet_wrap(~ sample, ncol = 6, scales = "fixed") + ylim(0,1.2) + 
+      scale_color_gradient(low = "lightgray", high = mut_color) +
+      scale_shape_manual(values = c("FALSE" = 21, "TRUE" = 15)) + ylab("")
+
+lims <- range(log10(ggdf$eigen+1))
+lims[1] <- floor(lims[1])
+lims[2] <- signif(lims[2]*1.2, 1)*0.99
+
+ybreaks <- scales::breaks_extended()(lims, n = 4)
+names(ybreaks) <- as.character(ybreaks)
+ybreaks <- ybreaks[-length(ybreaks)]
+
+gg_nodes %<>% + xlab("degree")
+gg_nodes %<>% + ylab("log(eigen+1)")
+gg_nodes %<>% + scale_y_continuous(expand = expansion(mult = c(0,0)),
+                               limits = lims,
+                               breaks = ybreaks,
+                               labels = names(ybreaks))
+
+ggsave(gg_nodes, filename = file.path(params$figures, "Fig4b.pdf"), device = "pdf", width = 12, height = 4)
+
+```
+
+```{r Perturbation pie charts}
+
+tres <- 0.05
+
+SGL$pie.crc.graphs <- SGL$crc.graphs %L>% function(graph){
+    piedata <- as.matrix(getdata(graph, type = "nodes", "kinaseNES"))
+    colnames(piedata) <- sub("CRC.*_", "", colnames(piedata))
+    piedata[naf(getdata(graph, type = "nodes", "kinaseFDR") > tres)] <- NA
+    V(graph)$piedata <- as.list(data.frame(t(piedata))) %>% lapply(., function(tmp) setNames(tmp, colnames(piedata)))
+    V(graph)$label <- V(graph)$name
+    V(graph)$label[rowSums(!is.na(piedata)) == 0] <- ""
+    V(graph)$nodesize <- ifelse(V(graph)$label=="","large","small")
+    V(graph)$pie = !sapply(V(graph)$piedata, function(x) all(is.na(x)))
+    graph
+}
+
+crc.pie.plots <- setNames(names(SGL$pie.crc.graphs), names(SGL$pie.crc.graphs)) %L>% function(x){
+  
+  graph <- SGL$pie.crc.graphs[[x]]
+  n <- ecount(graph)
+  
+  gg <- ggnet2(graph = graph,
+                edge_labdist = unit(0, 'npc'), edge_width = 3/n^0.7,
+                arrow_length = 0.7+40/(n^1.2), edge_endgap = 1 + 25/(n^0.6), edge_startgap = 0.1,
+                node_size = 80/sqrt(n^0.6+10),
+                strength = 0.1, node_labsize = 4.9/log(sqrt(n+7)), edge_labsize = 4/log(sqrt(n^1.2+7))*0.4,
+                node_mapping = aes(fill = kinaseNES, pie = piedata),
+               pie_nodesize = 10/sqrt(n^0.6+10),
+                label_mapping = aes(label = label),
+                edge_mapping = aes(linetype = MECHANISM),
+                arrow_mapping = aes(angle = EFFECT), angle = angle) +
+      scale_pie_color +
+      scale_edge_color +
+      scale_edge_linetype_manual(values = ltys) +
+      scale_size_manual(values = c(large=3,small=0.8))
+  
+  gg <- gg + ggtitle(label = x)
+  
+  return(gg)
+  }
+
+ggleg <- ggraph_legend(crc.pie.plots[[1]])
+gg <- lapply(crc.pie.plots, function(x) x + theme(legend.position = "none", plot.margin = margin(0.01, 0, 0, 0, unit = "npc"), plot.title = element_text(size = 12)))
+gg <- plot_grid(plotlist = gg, ncol = 2)
+
+ggsave(gg, filename = file.path(params$figures, "SuppFig3a.pdf"), device = "pdf", width = 9, height = 11)
+ggsave(ggleg, filename = file.path(params$figures, "SuppFig3a_legend.pdf"), device = "pdf", width = 2, height = 6)
+
+```
+
+
+```{r}
+
+saveRDS(SGL, file.path(params$resultsdir, "03_subgraphs.rds"))
+
+```
+
+

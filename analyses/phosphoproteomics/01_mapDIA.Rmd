@@ -1,0 +1,589 @@
+---
+title: "01_mapDIA"
+author: "Alexander Kirchmair"
+params:
+  data: ../../data
+  resultsdir: ../../results
+  SIGNOR: ../../tables/SIGNOR_all_data_23_04_21.tsv
+  libdir: ../../lib
+  tables: ../../tables
+  figures: ../../results/figures
+---
+
+```{r setup, include=FALSE}
+
+library(reshape2)
+library(ggplot2)
+library(ggrepel)
+library(cowplot)
+library(paletteer)
+library(openxlsx)
+library(dplyr)
+library(magrittr)
+
+source(file.path(params$libdir, "phosphoproteomics_functions.R"))
+source(file.path(params$libdir, "global_params.R"))
+
+if (!dir.exists(params$resultsdir)){ dir.create(params$resultsdir) }
+if (!dir.exists(file.path(params$resultsdir, "mapdia"))){ dir.create(file.path(params$resultsdir, "mapdia")) }
+if (!dir.exists(params$figures)){ dir.create(params$figures) }
+
+for (p in 1:length(params)){ do.call('Sys.setenv', params[p]) }
+
+```
+
+
+### 1. Preprocessing and mapDIA ----
+
+```{r Preprocessing parameters}
+
+phospho <- list()
+phospho$thres$intensity <- 2000 # values below threshold are set to NA
+phospho$thres$na <- 1 # max. allowed fraction of NAs per row
+phospho$thres$nfrag <- 5 # minimum number of fragments
+phospho$thres$max_na_ctrl <- 0 # max. allowed fraction of missing values in control group
+phospho$thres$max_na_trt <- 0 # max. allowed fraction of missing values in treatment group
+phospho$thres$min_trts_for_ctrl_imp <- Inf # number of treatment groups that must be measured to do imputation of the ctrl group
+phospho$thres$max_na_keep <- 0 # maximum allowed fraction of missing values in a group
+
+```
+
+
+Data import
+```{r Phosphoprotein data import}
+
+phospho$raw <- read.delim2(file.path(params$data, "phosphoproteomics", "mapDIA_input_phospho.txt"), dec=".")
+phospho$annotation <- phospho$raw[,colnames(phospho$raw) %in% c("ProteinName", "PeptideSequence", "FragmentIon", "RT")]
+phospho$data <- phospho$raw[,!colnames(phospho$raw) %in% c("ProteinName", "PeptideSequence", "FragmentIon", "RT")]
+
+phospho$design <- data.frame(row.names = colnames(phospho$data))
+phospho$design$trt <- sapply(strsplit(rownames(phospho$design), split = "_"), function(tmp) tmp[1] )
+phospho$design$trt[phospho$design$trt == "mTOR"] <- "mTORi"
+phospho$design$treatment <- relevel(factor(phospho$design$trt), ref = "control")
+phospho$design$rep <- sapply(strsplit(rownames(phospho$design), split = "_"), function(tmp) tmp[2] )
+phospho$design$CRC <- NA
+phospho$design$CRC[phospho$design$rep %in% 1:2] <- "CRC02"
+phospho$design$CRC[phospho$design$rep %in% 3:4] <- "CRC02b"
+phospho$design$CRC[phospho$design$rep %in% 5:6] <- "CRC03"
+phospho$design$CRC[phospho$design$rep %in% 7:8] <- "CRC04"
+phospho$design$CRC[phospho$design$rep %in% 9:10] <- "CRC13"
+phospho$design$CRC[phospho$design$rep %in% 11:12] <- "CRC26"  
+phospho$design$CRC[phospho$design$rep %in% 13:14] <- "CRC26LM"
+
+phospho$design$organoid <- phospho$design$CRC
+phospho$design$organoid[phospho$design$organoid == "CRC02b"] <- "CRC02"
+phospho$design$crcname <- paste0(phospho$design$organoid, "_", phospho$design$treatment)
+phospho$design$trtname <- paste0(phospho$design$treatment, "_", phospho$design$organoid)
+phospho$design <- phospho$design[order(phospho$design$organoid),]
+phospho$design <- phospho$design[order(phospho$design$treatment),]
+
+phospho$design$name <- paste0(phospho$design$crcname, "_", phospho$design$rep)
+phospho$data <- phospho$data[,rownames(phospho$design)]
+
+```
+
+
+Preprocessing
+```{r Phosphoprotein preprocessing}
+
+# Preprocess missing values
+phospho$imputation <- impute_groups(data = phospho$data,
+                                    design = phospho$design[colnames(phospho$data),],
+                                    min_value = phospho$thres$intensity,
+                                    max_na_ctrl = phospho$thres$max_na_ctrl ,
+                                    max_na_trt = phospho$thres$max_na_trt,
+                                    min_trts_for_ctrl_imp = phospho$thres$min_trts_for_ctrl_imp,
+                                    max_na_keep = phospho$thres$max_na_keep)
+
+phospho$imputed <- phospho$imputation$data
+
+# Remove NA rows
+phospho$row_na_fraction <- rowMeans(is.na(phospho$imputed))
+phospho$annotation_na_filtered <- phospho$annotation[phospho$row_na_fraction  < phospho$thres$na,]
+phospho$na_filtered <- phospho$imputed[phospho$row_na_fraction  < phospho$thres$na,]
+
+# Remove peptides with too few fragments
+phospho$annotation_na_filtered$ID <- paste0(phospho$annotation_na_filtered$PeptideSequence, "_", phospho$annotation_na_filtered$RT)
+nfrag <- aggregate(. ~ ID, phospho$annotation_na_filtered[,c("ID", "FragmentIon")], FUN = length)
+dimnames(nfrag) <- list(nfrag$ID, c("ID", "n"))
+phospho$annotation_na_filtered$nfragments <- nfrag[phospho$annotation_na_filtered$ID,]$n
+phospho$filtered <- phospho$na_filtered[phospho$annotation_na_filtered$nfragments >= phospho$thres$nfrag,]
+phospho$annotation_filtered <- phospho$annotation_na_filtered[phospho$annotation_na_filtered$nfragments >= phospho$thres$nfrag,]
+
+```
+
+
+Preprocessing plots
+```{r Phosphoprotein preprocessing plots, collapse = TRUE}
+
+# Intensity filtering
+ggdata <- melt(phospho$data, na.rm = TRUE)
+ggdata$trt <- gsub(pattern = "_.*", "", ggdata$variable)
+(gg1 <- ggplot(ggdata, aes(x = value, fill = trt)) +
+  theme_classic(base_size = 20) + 
+  geom_histogram(binwidth = 50, color = rgb(0,0,0)) +
+  geom_vline(xintercept = phospho$thres$intensity, linetype="dashed") +
+  scale_x_continuous(expand = c(0,NA), limits = c(0, phospho$thres$intensity*2.5)) +
+  scale_y_continuous(expand = c(0,NA), limits = c(0, 10000)))
+gg1
+
+# Missing value filtering
+(gg2 <- ggplot(data.frame("row_NA_fraction" = phospho$row_na_fraction), aes(x = row_NA_fraction)) +
+  theme_classic(base_size = 20) +
+  geom_histogram(binwidth = 0.05, color = "black") +
+  geom_vline(xintercept = phospho$thres$na, linetype="dashed"))
+gg2
+
+# Fragment filtering
+(gg3 <- ggplot(phospho$annotation_na_filtered, aes(x = nfragments)) +
+  theme_classic(base_size = 20) +
+  geom_histogram(binwidth = 1, color = "black")) +
+  geom_vline(xintercept = phospho$thres$nfrag, linetype="dashed")
+gg3
+
+```
+
+
+Write mapDIA input
+```{r Phosphoprotein mapDIA input}
+
+phospho$mapDIA_input_preprocessed <- data.frame(phospho$annotation_filtered, phospho$filtered, stringsAsFactors = FALSE)[,colnames(phospho$raw)]
+write.table(phospho$mapDIA_input_preprocessed, file.path(params$resultsdir, "mapdia", "mapDIA_input_phospho.txt"),
+            quote=FALSE, row.names=FALSE, sep="\t")
+
+setmapDIAparams(design = phospho$design,
+                formula = ~ CRC|treatment,
+                params_file = file.path(params$resultsdir, "mapdia", "mapDIA_params_phospho.txt"),
+                input_data = file.path(params$resultsdir, "mapdia", "mapDIA_input_phospho.txt"))
+""
+```
+
+
+Run mapDIA
+```{bash Phosphoprotein mapDIA, engine.opts = '-l', results = "hide"}
+
+conda env create -f ../../../organoids/envs/mapDIA-env.yml -n organoids_mapdia
+conda activate organoids_mapdia
+
+cd $resultsdir/mapdia
+mapDIA 'mapDIA_params_phospho.txt'
+
+conda deactivate
+conda remove --name organoids_mapdia --all -y
+
+```
+
+
+
+### 2. Postprocessing ----
+
+
+Import all results from mapDIA
+```{r Import results}
+
+phosphodata <- list()
+phosphoresults <- file.path(params$resultsdir, "mapdia")
+phosphodata$log2data <- read.delim(file = file.path(phosphoresults, "log2_data.txt"), stringsAsFactors = FALSE) # fragment-level data
+phosphodata$peptidelevels <- read.delim(file = file.path(phosphoresults, "peptide_level.txt"), stringsAsFactors = FALSE) # peptide-level data
+phosphodata$proteinlevels <- read.delim(file = file.path(phosphoresults, "protein_level.txt"), stringsAsFactors = FALSE) # protein level data
+phosphodata$DE.long <- read.delim(file = file.path(phosphoresults, "analysis_output.txt"), stringsAsFactors = FALSE) # DE output in long format
+
+```
+
+
+
+Postprocessing/annotation of phosphopeptide data
+```{r Phosphopeptide annotation}
+
+phosphodata$design <- phospho$design
+phosphodata$imputation$impute <- data.frame(phospho$imputation$impute)[rownames(phospho$filtered),]
+phosphodata$imputation$remove <- data.frame(phospho$imputation$remove)[rownames(phospho$filtered),]
+phosphodata$imputation$annotation <- phospho$annotation_filtered
+
+phosphodata$annotation <- data.frame(row.names = unique(phosphodata$log2data$Protein),
+                                     protein = sapply(strsplit(unique(phosphodata$log2data$Protein), split = "__"), function(tmp) tmp[1] ),
+                                     peptide = gsub("_", "", sapply(strsplit(unique(phosphodata$log2data$Protein), split = "__"), function(tmp) tmp[2] )), stringsAsFactors = FALSE)
+
+phosphodata$annotation <- phosphodata$annotation[!grepl(pattern = "CON__", rownames(phosphodata$annotation)),]
+
+```
+
+
+```{r Phosphopeptide annotation}
+
+geneslib <- read.delim(file.path(params$tables, "phosphoprot_to_gene_name.tsv"))
+psiteres <- read.delim(file.path(params$tables, "phosphosites.tsv"))
+
+rownames(geneslib) <- geneslib$uniprot
+phosphodata$annotation$gene <- geneslib[phosphodata$annotation$protein,]$gene
+phosphodata$annotation$synonyms <- geneslib[phosphodata$annotation$protein,]$synonyms
+
+# For phosphopeptides with multiple matched proteins, split the proteins, get the phosphosite positions for each, and merge the rows back again
+tmp.annotation <- phosphodata$annotation[,c("protein", "peptide", "gene")]
+tmp.annotation$id <- 1:nrow(tmp.annotation)
+tmp.annotation$protein.split <- tmp.annotation$protein
+tmp.annotation.split <- c()
+for (i in 1:nrow(tmp.annotation)){
+  tmp <- tmp.annotation[i,,drop=FALSE]
+  prot.all <- unique(unlist(strsplit(tmp$protein.split, split = ";")))
+  for (j in 1:length(prot.all)){
+    tmp.j <- tmp
+    tmp.j$protein.split <- prot.all[j]
+    tmp.annotation.split <- rbind(tmp.annotation.split, tmp.j)
+  }
+}
+
+tmp.annotation.split$psite <- psiteres$psites
+tmp.annotation.split$flankseqs <- psiteres$flankseqs
+
+# get gene information
+tmp.annotation.split$gene <- geneslib[tmp.annotation.split$protein.split,]$gene
+tmp.annotation.split$gene[is.na(tmp.annotation.split$gene)] <- tmp.annotation.split$protein.split[is.na(tmp.annotation.split$gene)]
+tmp.annotation.split$psite_name <- paste0(tmp.annotation.split$gene, "_", tmp.annotation.split$psite)
+tmp.annotation.split$psite_name_protein <- paste0(tmp.annotation.split$protein.split, "_", tmp.annotation.split$psite)
+
+# merge back by protein
+tmp.annotation.split$psite <- sapply(tmp.annotation.split$id, function(tmpdup) paste(tmp.annotation.split$psite[ tmp.annotation.split$id == tmpdup ], collapse = ";") )
+tmp.annotation.split$psite_name <- sapply(tmp.annotation.split$id, function(tmpdup) paste(tmp.annotation.split$psite_name[ tmp.annotation.split$id == tmpdup ], collapse = ";") )
+tmp.annotation.split$psite_name_protein <- sapply(tmp.annotation.split$id, function(tmpdup) paste(tmp.annotation.split$psite_name_protein[ tmp.annotation.split$id == tmpdup ], collapse = ";") )
+
+phosphodata$annotation$psite <- tmp.annotation.split[rownames(phosphodata$annotation),]$psite
+phosphodata$annotation$psite_name <- tmp.annotation.split[rownames(phosphodata$annotation),]$psite_name
+phosphodata$annotation$psite_name_protein <- tmp.annotation.split[rownames(phosphodata$annotation),]$psite_name_protein
+phosphodata$annotation$flankseqs <- tmp.annotation.split[rownames(phosphodata$annotation),]$flankseqs
+
+phosphodata$annotation$psite_name_pep <- phosphodata$annotation$psite_name
+ix <- phosphodata$annotation$psite_name_pep %in% phosphodata$annotation$psite_name_pep[duplicated(phosphodata$annotation$psite_name_pep)] # all duplicates
+i <- 1
+phosphodata$annotation$psite_name_pep[ix] <- paste0(phosphodata$annotation$psite_name[ix], "_pep", i)
+while (any(duplicated(phosphodata$annotation$psite_name_pep))){
+    i <- i+1
+    ix <- which(duplicated(phosphodata$annotation$psite_name_pep))
+    phosphodata$annotation$psite_name_pep[ix] <- paste0(phosphodata$annotation$psite_name[ix], "_pep", i)
+}
+
+phosphodata$annotation$psite_name_protein_pep <- phosphodata$annotation$psite_name_protein
+ix <- phosphodata$annotation$psite_name_protein_pep %in% phosphodata$annotation$psite_name_protein_pep[duplicated(phosphodata$annotation$psite_name_protein_pep)] # all duplicates
+i <- 1
+phosphodata$annotation$psite_name_protein_pep[ix] <- paste0(phosphodata$annotation$psite_name_protein[ix], "_pep", i)
+while (any(duplicated(phosphodata$annotation$psite_name_protein_pep))){
+    i <- i+1
+    ix <- which(duplicated(phosphodata$annotation$psite_name_protein_pep))
+    phosphodata$annotation$psite_name_protein_pep[ix] <- paste0(phosphodata$annotation$psite_name_protein[ix], "_pep", i)
+}
+
+phosphodata$pepdata <- phosphodata$peptidelevels[,!colnames(phosphodata$peptidelevels) %in% c("Protein", "Peptide", "nFragment")]
+rownames(phosphodata$pepdata) <- phosphodata$peptidelevels$Protein
+phosphodata$pepdata <- phosphodata$pepdata[!grepl(pattern = "CON__", rownames(phosphodata$pepdata)),]
+
+# DE results annotation
+phosphodata$DE.long$psite_name <- phosphodata$annotation[phosphodata$DE.long$Protein,]$psite_name
+phosphodata$DE.long$labels <- phosphodata$annotation[phosphodata$DE.long$Protein,]$psite_name_pep
+
+phosphodata$DE.long$sample <- sapply(strsplit(phosphodata$DE.long$Label2, split = "/", fixed = TRUE), function(tmp) tmp[1])
+phosphodata$DE.long$trt <- sapply(strsplit(phosphodata$DE.long$sample, split = "_", fixed = TRUE), function(tmp) tmp[1])
+phosphodata$DE.long$org <- sapply(strsplit(phosphodata$DE.long$sample, split = "_", fixed = TRUE), function(tmp) tmp[2])
+phosphodata$DE.long$crc <- phosphodata$DE.long$org
+phosphodata$DE.long$crc[phosphodata$DE.long$crc == "CRC02b"] <- "CRC02"
+phosphodata$DE.long$group <- paste0(phosphodata$DE.long$crc, "_", phosphodata$DE.long$trt)
+
+phosphodata$DE.pep <- phosphodata$DE.long[!grepl(pattern = "CON__", phosphodata$DE.long$Protein),]
+
+ix_trtvsctrl <- sapply(gregexpr(pattern = "control", text = phosphodata$DE.pep$Label2), function(tmp) sum( tmp > 0 ) == 1)
+phosphodata$DE.pep <- phosphodata$DE.pep[ix_trtvsctrl,]
+
+# LFCs
+phosphodata$lfc.pep <- dcast(phosphodata$DE.pep[,c("log2FC", "group", "labels")], formula = labels ~ group, value.var = "log2FC")
+rownames(phosphodata$lfc.pep) <- phosphodata$lfc.pep$labels
+phosphodata$lfc.pep$labels <- NULL
+
+# FDRs
+phosphodata$fdr.pep <- dcast(phosphodata$DE.pep[,c("FDR", "group", "labels")], formula = labels ~ group, value.var = "FDR")
+rownames(phosphodata$fdr.pep) <- phosphodata$fdr.pep$labels
+phosphodata$fdr.pep$labels <- NULL
+
+phosphodata$DEdesign <- phosphodata$design[match(colnames(phosphodata$lfc), phosphodata$design$crcname),]
+rownames(phosphodata$DEdesign) <- phosphodata$DEdesign$crcname
+phosphodata$DEdesign$rep <- NULL
+
+# Fraction of peptides with imputed values per phosphopeptide
+impdf <- melt(aggregate(. ~ protein, data.frame("protein" = phosphodata$imputation$annotation$ProteinName, phosphodata$imputation$impute), FUN = mean))
+impdf$id <- paste0(impdf$protein, "_", phosphodata$design[impdf$variable,]$treatment, "_", phosphodata$design[impdf$variable,]$CRC)
+impdf <- aggregate(. ~ id, subset(impdf, select = c(id, value)), FUN = mean)
+rownames(impdf) <- impdf$id
+phosphodata$DE.pep$class2 <- paste0(phosphodata$DE.pep$Protein, "_", gsub("/.*", "", phosphodata$DE.pep$Label2))
+phosphodata$DE.pep$class1 <- paste0(phosphodata$DE.pep$Protein, "_", gsub(".*/", "", phosphodata$DE.pep$Label2))
+phosphodata$DE.pep$imputed_class2 <- impdf[phosphodata$DE.pep$class2,]$value
+phosphodata$DE.pep$imputed_class1 <- impdf[phosphodata$DE.pep$class1,]$value
+
+```
+
+
+Selection of phosphopeptides containing the same phosphosite
+```{r Phosphopeptide selection}
+
+# Select multi-site peptides based on higher mean expression
+rownames(phosphodata$peptidelevels) <- phosphodata$peptidelevels$Protein
+tmpdata <- phosphodata$peptidelevels[rownames(phosphodata$annotation),rownames(phosphodata$design)]
+phosphodata$annotation$mean <- rowMeans(tmpdata[,phosphodata$design$treatment == "control"])
+phosphodata$annotation$select <- selectMultiples(v = phosphodata$annotation$mean, vnames = phosphodata$annotation$psite_name, FUN = max)
+
+# Prepare results with phosphosite positions as unique identifiers
+ids <- intersect(rownames(phosphodata$annotation), rownames(phosphodata$pepdata))
+phosphodata$data <- phosphodata$pepdata[ids[phosphodata$annotation[ids,]$select],]
+rownames(phosphodata$data) <- phosphodata$annotation[rownames(phosphodata$data),]$psite_name
+phosphodata$DE <- phosphodata$DE.pep[phosphodata$DE.pep$labels %in% phosphodata$annotation$psite_name_pep[phosphodata$annotation$select],]
+phosphodata$DE$labels <- phosphodata$DE$psite_name
+phosphodata$DE$Peptide <- phosphodata$DE$Protein
+phosphodata$DE$protein <- phosphodata$annotation[phosphodata$DE$Peptide,]$protein
+phosphodata$DE$gene <- phosphodata$annotation[phosphodata$DE$Peptide,]$gene
+phosphodata$lfc <- dcast(phosphodata$DE[,c("log2FC", "group", "labels")], formula = labels ~ group, value.var = "log2FC")
+rownames(phosphodata$lfc) <- phosphodata$lfc$labels
+phosphodata$lfc$labels <- NULL
+phosphodata$fdr <- dcast(phosphodata$DE[,c("FDR", "group", "labels")], formula = labels ~ group, value.var = "FDR")
+rownames(phosphodata$fdr) <- phosphodata$fdr$labels
+phosphodata$fdr$labels <- NULL
+
+
+# Prepare results with uniprot-id phosphosite positions as unique identifiers
+ids <- intersect(rownames(phosphodata$annotation), rownames(phosphodata$pepdata))
+phosphodata$protdata <- phosphodata$pepdata[ids[phosphodata$annotation[ids,]$select],]
+rownames(phosphodata$protdata) <- phosphodata$annotation[rownames(phosphodata$protdata),]$psite_name_protein
+phosphodata$protDE <- phosphodata$DE.pep[phosphodata$DE.pep$labels %in% phosphodata$annotation$psite_name[phosphodata$annotation$select],]
+phosphodata$protDE$psite_name_protein <- phosphodata$annotation[phosphodata$protDE$Protein,]$psite_name_protein
+phosphodata$protDE$labels <- phosphodata$protDE$psite_name_protein
+phosphodata$protDE$Peptide <- phosphodata$protDE$Protein
+phosphodata$protDE$protein <- phosphodata$annotation[phosphodata$protDE$Peptide,]$protein
+phosphodata$protDE$gene <- phosphodata$annotation[phosphodata$protDE$Peptide,]$gene
+phosphodata$prot.lfc <- dcast(phosphodata$protDE[,c("log2FC", "group", "labels")], formula = labels ~ group, value.var = "log2FC")
+rownames(phosphodata$prot.lfc) <- phosphodata$prot.lfc$labels
+phosphodata$prot.lfc$labels <- NULL
+phosphodata$prot.fdr <- dcast(phosphodata$protDE[,c("FDR", "group", "labels")], formula = labels ~ group, value.var = "FDR")
+rownames(phosphodata$prot.fdr) <- phosphodata$prot.fdr$labels
+phosphodata$prot.fdr$labels <- NULL
+
+# Prepare results with flanking sequences as unique identifiers
+phosphodata$annotation$flankseqs[is.na(phosphodata$annotation$flankseqs)] <- "NA"
+phosphodata$annotation$flank.select <- selectMultiples(v = phosphodata$annotation$mean, vnames = phosphodata$annotation$flankseqs, FUN = max)
+phosphodata$flank.DE <- phosphodata$DE.pep[phosphodata$DE.pep$labels %in% phosphodata$annotation$psite_name_pep[phosphodata$annotation$flank.select],]
+phosphodata$flank.DE$flankseqs <- phosphodata$annotation[phosphodata$flank.DE$Protein,]$flankseqs
+phosphodata$flank.DE$labels <- phosphodata$flank.DE$flankseqs
+phosphodata$flank.DE$Peptide <- phosphodata$flank.DE$Protein
+phosphodata$flank.DE$protein <- phosphodata$annotation[phosphodata$flank.DE$Peptide,]$protein
+phosphodata$flank.DE$gene <- phosphodata$annotation[phosphodata$flank.DE$Peptide,]$gene
+phosphodata$flank.lfc <- dcast(phosphodata$flank.DE[,c("log2FC", "group", "labels")], formula = labels ~ group, value.var = "log2FC")
+rownames(phosphodata$flank.lfc) <- phosphodata$flank.lfc$labels
+phosphodata$flank.lfc$labels <- NULL
+phosphodata$flank.fdr <- dcast(phosphodata$flank.DE[,c("FDR", "group", "labels")], formula = labels ~ group, value.var = "FDR")
+rownames(phosphodata$flank.fdr) <- phosphodata$flank.fdr$labels
+phosphodata$flank.fdr$labels <- NULL
+
+```
+
+
+LFC comparison
+```{r}
+
+lfcs <- unique(phosphodata$design$CRC) %L>% function(crc){
+  grep("control", unique(subset(phosphodata$design, CRC == crc)$trtname), value = TRUE, invert = TRUE) %S>% function(trt){
+    tmpsamples <- rownames(phosphodata$design)[phosphodata$design$trtname == trt]
+    tmpctrl <- rownames(phosphodata$design)[phosphodata$design$treatment == "control" & phosphodata$design$CRC == crc]
+    log2( rowMeans(phosphodata$peptidelevels[,tmpsamples, drop = FALSE]) / rowMeans(phosphodata$peptidelevels[,tmpctrl, drop = FALSE]))
+  }
+}
+lfcs <- lfcs %>% Reduce(f = cbind)
+rownames(lfcs) <- phosphodata$annotation[rownames(lfcs),"psite_name"]
+
+df <- melt(lfcs)
+df$sample <- factor(df$Var2, levels = sort(unique(df$Var2)))
+df$ids <- paste0(df$Var1, "_", df$Var2)
+tmpids <- paste0(phosphodata$DE$psite_name, "_", phosphodata$DE$trt, "_", phosphodata$DE$crc)
+df$mapdia <- phosphodata$DE$log2FC[match(df$ids, tmpids)]
+df$FDR_mapdia <- phosphodata$DE$FDR[match(df$ids, tmpids)]
+
+gg <- ggplot(df, aes(x = value, y = mapdia, color = -log10(FDR_mapdia))) +
+  theme_bw() +
+  geom_point(size = 0.05) + 
+  scale_color_gradient(low = rgb(0.2,0.2,0.2,0.2), high = rgb(0.9,0,0), na.value = rgb(0,0,0,0.1)) +
+  facet_wrap(~ sample, scales = "fixed", ncol = 6) + xlab("lfc") + ylab("LFC_mapdia")
+
+ gg
+
+```
+
+
+
+Volcanoplot
+```{r Volcanoplot}
+
+phosphodata$DE$gglabels <- phosphodata$DE$labels
+phosphodata$DE$descore <- abs(as.numeric(scale(-log10(phosphodata$DE$FDR+1))) * as.numeric(scale(phosphodata$DE$log2FC)))
+phosphodata$DE$gglabels[phosphodata$DE$descore < sort(phosphodata$DE$descore, decreasing = TRUE)[50]] <- ""
+
+gg <- ggplot(phosphodata$DE, aes(x=log2FC, y=-log10(FDR), color = Label2, label = gglabels)) +
+  theme_bw(base_size = 26) +
+  geom_point(alpha=0.8, shape = 19, size = 1, stroke=0) +
+  geom_text_repel() +
+  scale_color_paletteer_d("ggsci::default_igv") +
+  guides(color = FALSE) +
+  ggtitle(label = NULL, subtitle = paste0("FDR < 0.05: ", sum(phosphodata$DE$FDR <= 0.05), " phosphosites"))
+phosphodata$DE$gglabels <- NULL
+
+gg
+
+```
+
+PCA plot
+```{r PCA}
+
+anno_df <- phosphodata$design[,c("treatment", "organoid")]
+rownames(anno_df) <- phosphodata$design$name
+anno_df$treatment <- factor(anno_df$treatment)
+anno_df$treatment <- relevel(anno_df$treatment, ref = "control")
+
+pcadata <- t(phosphodata$data)
+rownames(pcadata) <- phosphodata$design[rownames(pcadata),]$name
+pca <- prcomp(pcadata[,apply(pcadata, 2, var, na.rm = TRUE) != 0], center = T, scale. = T)
+pca_df <- data.frame(pca$x[rownames(anno_df),], anno_df)
+variance_explained <- summary(pca)$importance["Proportion of Variance", ]
+
+ggpca <- ggplot(pca_df, aes(x=PC1, y=PC2, color = organoid, shape = treatment)) + 
+  geom_point(size = 4, stroke = 1.5) + 
+  theme_bw(base_size = 18) + 
+  theme(panel.border = element_rect(colour = "black", fill = "transparent", size = 1)) +
+  scale_color_manual(values = colors$organoid[unique(pca_df$organoid)]) + 
+  scale_shape_manual(values = c(20, 0:c(length(unique(pca_df$treatment))-2))) +
+  xlim(min(pca_df$PC1), 1.1*max(pca_df$PC1)) + 
+  xlab(paste0("PC1 (", 100*round(variance_explained[1], 2), "%)")) + 
+  ylab(paste0("PC2 (", 100*round(variance_explained[2], 2), "%)")) + 
+  labs(color = "organoid", shape = "treatment") +
+  coord_fixed(ratio = 1)
+
+ggsave(plot = ggpca, device = "pdf",
+       filename = file.path(params$figures, "Fig3a.pdf"),
+       units = "px", width = 2500, height = 2000, dpi = 300,bg = "transparent")
+
+```
+
+
+LFC heatmap of signif. phosphosites
+```{r LFC heatmap}
+
+heatdata <- phosphodata$lfc[phosphodata$fdr %row<% 0.05,]
+heatdata[is.na(heatdata)] <- 0
+
+top_df <- phosphodata$design[match(colnames(heatdata), phosphodata$design$crcname), c("treatment", "organoid", "crcname")]
+rownames(top_df) <- top_df$crcname
+top_df$crcname <- NULL
+colnames(top_df) <- c("treatment", "organoid")
+
+heatmap(heatdata,
+        rownames_width = 0.4,
+        scale_rows = FALSE,
+        top_df = top_df,
+        plot_top_legend = TRUE,
+        top_df_colors = colors,
+        top_df_height = 3,
+        annofontsize = 18,
+        coltitle = "",
+        rowlabsize = 0,
+        cluster_rows = TRUE,
+        plot_row_clusters = TRUE,
+        coldend_size = 0.06,
+        rowdend_size = 0.06,
+        colorscale_legend_title = "lfc",
+        anno_leg_size = 1.5,
+        legend_separate_file = F,
+        col_leg_height = 0.7,
+        col_leg_width = 1,
+        leg_fontsize = 18, 
+        colorscale = colorRamp2(c(-3,0,3), c("blue", "white", "red")),
+        bg = rgb(1,1,1), width = 5000, height = 4000, 
+        scale_margins = c(1,1.5,1,1),
+        use_raster = T,
+        pdffile = file.path(params$figures, "SuppFig2c"))
+
+```
+
+
+
+Target site plots 
+```{r Treatment target phosphosites}
+
+signor <- read.csv(file.path(params$SIGNOR), sep = "\t", stringsAsFactors = FALSE)
+signor %<>% subset(TAX_ID %in% c(9606, -1)) %>% signor2net() %>%  subset(PSITE != "")
+target_sites <- trt_targets %L>% function(tmp){ sort(unique(signor$PSITE_NAME[signor$from %in% tmp])) }
+
+# add known sites
+target_sites$TNFalpha <- base::union(target_sites$TNFalpha, "MAPK14_Y182")
+target_sites$TBKi <- base::union(target_sites$TBKi, "MAP3K1_S923")
+target_sites$mTORi <- base::union(target_sites$mTORi, "IRS2_T527")
+target_sites$PI3Ki <- base::union(target_sites$PI3Ki, "IRS2_T527")
+
+
+measured_sites <- names(target_sites) %L>% function(tmp){intersect(subset(phosphodata$DE, trt == tmp)$psite_name, target_sites[[tmp]])}
+measured_sites <- measured_sites[measured_sites %S>% length() > 0]
+
+phosphodata$DE$crc <- factor(phosphodata$DE$crc)
+phosphodata$DE$DE <- factor(ifelse(phosphodata$DE$FDR <= 0.05, "sig", "not sig"))
+
+site_plots <- names(measured_sites) %L>% function(tmp){
+  
+  plotdata <- subset(phosphodata$DE, psite_name %in% measured_sites[[tmp]] & trt == tmp)
+  colnames(plotdata)[colnames(plotdata) == "labels"] <- "phosphosite"
+  
+  ggplot(data = plotdata, aes(x = phosphosite, y = log2FC, color = log2FC, fill = log2FC, shape = DE)) +
+    theme_bw(base_size = 18) + xlab(NULL) +
+    theme(panel.border = element_rect(colour = "black", fill=NA, size=1),
+          legend.title = element_blank(),
+          legend.margin = margin(0.5, 1, 1, 1),
+          strip.background =  element_rect(colour = NA, fill = rgb(0.85,0.85,0.85), size=1),
+          axis.text.x = element_text(color = rgb(0,0,0), size = 7, angle = 90, hjust = 1, vjust = 0.5,
+                                     margin = margin(t = 0, r = 0, b = 0.02, l = 0, unit = "npc")),
+          plot.title = element_text(hjust = 0.5),
+          plot.margin = margin(5, 5, 5, 5, unit = "pt"),
+          legend.position = "right") +
+    geom_segment(aes(xend=phosphosite, y=0, yend=log2FC), size = 1.3) +
+    geom_hline(yintercept=0, linetype="dashed", color = rgb(0,0,0)) + 
+    geom_point(size = 4, colour="black") +
+    scale_shape_manual(values = c("sig" = 23, "not sig" = 21), drop = FALSE) +
+    ggtitle(tmp) + 
+    facet_wrap(. ~ crc, nrow = 1, scales = "free_x", drop = FALSE) + 
+    scale_color_gradient2(low = "#5106b2", mid = rgb(0.94,0.94,0.94), high = "#f2c80e", midpoint = 0) +
+    scale_fill_gradient2(low = "#5106b2", mid = rgb(0.94,0.94,0.94), high = "#f2c80e", midpoint = 0) +
+    ylim(1.2*c(floor(min(plotdata$log2FC)), max(ceiling(plotdata$log2FC), 0.2))) +
+    guides(color = "none", fill = "none")
+}
+
+site_plot <- plot_grid(plotlist = site_plots, ncol = 1, align = "hv")
+ggsave(path = params$figures, filename = "SuppFig2b.pdf",
+       plot = site_plot, device = "pdf", units = "in", width = 17, height = 18, dpi = 300)
+
+```
+
+
+```{r Export data}
+
+if (!file.exists(file.path(params$data, "phosphoproteomics", "sample_info.tsv"))){
+  write.table(x = data.frame(sample = rownames(phosphodata$design), select(phosphodata$design, -c(trt, CRC, crcname, trtname)))[colnames(phosphodata$log2data)[-(1:3)],],
+              file = file.path(params$data, "phosphoproteomics", "sample_info.tsv"),
+              quote = FALSE, row.names = FALSE, sep = "\t")
+}
+
+if (!file.exists(file.path(params$data, "phosphoproteomics", "mapDIA_results_phospho.tsv"))){
+  write.table(x = select(phosphodata$DE, -c(labels, sample, org, group, class2, class1, imputed_class2, imputed_class1, descore, DE)),
+              file = file.path(params$data, "phosphoproteomics", "mapDIA_results_phospho.tsv"),
+              quote = FALSE, row.names = FALSE, sep = "\t")
+}
+
+```
+
+
+```{r}
+
+saveRDS(phosphodata, file.path(params$resultsdir, "01_phosphodata.rds"))
+
+```
+
+
+
