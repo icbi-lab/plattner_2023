@@ -323,6 +323,34 @@ ggsave(ggleg, filename = file.path(params$figures, "SuppFig3a_legend.pdf"), devi
 ```
 
 
+
+```{r}
+
+mut_all <- getdata(SGL$IG, "mutated")
+
+mut_res <- names(SGL$crc.graphs) %S>% function(crc){
+  
+  x <- rowSums(mut_all[,grepl(pattern = paste0(crc, "_"), x = colnames(mut_all))]) > 0
+  mut_sub <- getdata(SGL$crc.graphs[[crc]], "mutated")
+  y <- rowSums(mut_sub) > 0
+  
+  contable <- matrix(nrow=2, ncol=2)
+  rownames(contable) <- c("subnet", "global")
+  colnames(contable) <- c("mut", "notmut")
+  contable["subnet", "mut"] <- sum(y)
+  contable["subnet", "notmut"] <- sum(!y)
+  contable["global", "mut"] <- sum(x[!names(x) %in% names(y)], na.rm = T)
+  contable["global", "notmut"] <- sum(!x[!names(x) %in% names(y)], na.rm = T)
+  
+  fisher.test(contable, alternative="two.sided")$p.value
+}
+
+write.table(data.frame(organoid = names(mut_res), pval = mut_res),
+            file = file.path(params$results, "Subgraph_mutations_fisher.txt"), quote = F, row.names = F)
+
+```
+
+
 ```{r}
 
 saveRDS(SGL, file.path(params$resultsdir, "03_subgraphs.rds"))
