@@ -8,7 +8,7 @@ conda env create -f IMCanalysis.yml
 ```
 
 ## Obtain the data
-All preprocessed data required to run these analyses are available from [Zenodo](https://zenodo.org/record/xxxxx).
+All preprocessed data required to run these analyses are available from [Zenodo](https://doi.org/10.5281/zenodo.7015015).
 
 ```bash
 cd ../../../data
