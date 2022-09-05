@@ -12,7 +12,7 @@ All preprocessed data required to run these analyses are available from [Zenodo]
 
 ```bash
 cd ../../../data
-wget -O imaging.zip https://zenodo.org/record/3984770/files/imaging.zip?download=1
+wget -O imaging.zip https://zenodo.org/record/7015015/files/imaging.zip?download=1
 unzip imaging.zip
 cd analyses/imaging/spatial
 ```
