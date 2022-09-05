@@ -1,5 +1,5 @@
 # plattner_2022
-Code to reproduce figures from Plattner et al. (2022)
+Source code to reproduce figures from Plattner et al. (Manuscript submitted)
 
 
 ## Obtain the data
@@ -15,5 +15,7 @@ wget -O proteomics.zip https://zenodo.org/record/7015015/files/proteomics.zip?do
 wget -O rnaseq.zip https://zenodo.org/record/7015015/files/rnaseq.zip?download=1
 wget -O scrnaseq.zip https://zenodo.org/record/1015015/files/scrnaseq.zip?download=1
 unzip *.zip
-
 ```
+
+## Contact
+If you have questions regarding the analyses, please use the [issue tracker](https://github.com/icbi-lab/plattner_2022/issues).
