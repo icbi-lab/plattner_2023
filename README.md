@@ -7,5 +7,13 @@ All preprocessed data required to run these analyses are available from [Zenodo]
 
 ```bash
 cd ../../../data
-wget -O imaging.zip https://zenodo.org/record/3984770/files/imaging.zip?download=1
+wget https://zenodo.org/record/7015015/files/clinical_data_organoids.tsv?download=1
+wget -O exomeseq.zip https://zenodo.org/record/7015015/files/exomeseq.zip?download=1
+wget -O imaging.zip https://zenodo.org/record/7015015/files/imaging.zip?download=1
+wget -O phosphoproteomics.zip  https://zenodo.org/record/7015015/files/phosphoproteomics.zip?download=1
+wget -O proteomics.zip https://zenodo.org/record/7015015/files/proteomics.zip?download=1
+wget -O rnaseq.zip https://zenodo.org/record/7015015/files/rnaseq.zip?download=1
+wget -O scrnaseq.zip https://zenodo.org/record/1015015/files/scrnaseq.zip?download=1
+unzip *.zip
+
 ```
