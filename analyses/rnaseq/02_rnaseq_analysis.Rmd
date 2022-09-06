@@ -439,7 +439,7 @@ sg1 <- as.matrix(t(scale(t(sg1))))
 
 
 Plot heatmap of gene panel:
-```{r, fig.height=8, fig.width=10}
+```{r, fig.height=8, fig.width=12}
 # annotation
 annotation_df = as.data.frame(annot_row[rownames(annot_row) %in% rownames(sg1)  , ])
 rownames(annotation_df) <- rownames(sg1)
@@ -447,18 +447,25 @@ colnames(annotation_df) <- "group"
 
 colors <- c("APCr" = "paleturquoise2", "chemokine" = "lightgreen", "chemokine.r" = "royalblue1", "cytokine" = "lightpink1", "HLA" = "lightgoldenrod1", "IFNg" = "grey")
 
+ha2 <-rowAnnotation(df = annotation_df, col=list(group=colors), 
+                                        annotation_legend_param = list(title_gp = gpar(fontsize=30), labels_gp = gpar(fontsize=30)))
 # rename 'CD274' to 'PD-L1':
 rownames(sg1)[rownames(sg1)=="CD274"] <- "PD-L1"
+
+### include annotation for MSI status:
+# reorder samples:
+sg1 <- sg1[, rownames(msi_status)]
 
 hm <- Heatmap(sg1,
         cluster_rows = FALSE, cluster_columns = TRUE,
         column_names_gp = gpar(fontsize=30),
         row_names_gp = gpar(fontsize=30),
-        left_annotation = rowAnnotation(df = annotation_df, col=list(group=colors), 
-                                        annotation_legend_param = list(title_gp = gpar(fontsize=30), labels_gp = gpar(fontsize=30))),
+        top_annotation = ha,
+        left_annotation = ha2,
         row_split=annotation_df, row_title= " ",
         heatmap_legend_param = list(title="z-score", labels_gp= gpar(fontsize=30), title_gp = gpar(fontsize=30), at = c(-4,-2,0,2,4), 
                                     labels=c('-4', '-2', '  0', '  2', '  4')))
+
 
 pdf(file.path(params$paper_figures, "SuppFigure1D.pdf"), width = 20, height=20, pointsize = 30)
 draw(hm, heatmap_legend_side= "bottom", annotation_legend_side="bottom")
