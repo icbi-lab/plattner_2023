@@ -25,7 +25,6 @@ library(circlize)
 library(dplyr)
 library(magrittr)
 library(cowplot)
-library(BiocParallel)
 library(graphlayouts)
 library(matrixStats)
 library(conflicted)
@@ -42,7 +41,7 @@ conflict_prefer("exprs", "rlang")
 conflict_prefer("active", "tidygraph")
 
 if (!dir.exists(params$results)) dir.create(params$results)
-if (!dir.exists(params$figures)){ dir.create(params$figures) }
+if (!dir.exists(params$figures)) dir.create(params$figures)
 
 source(file.path(params$libdir, "phosphoproteomics_functions.R"))
 source(file.path(params$libdir, "global_params.R"))
@@ -53,14 +52,9 @@ source(file.path(params$libdir, "global_params.R"))
 
 ### Data import and graph annotation ----
 
-```{r}
+```{r Data}
 
 phosphodata <- readRDS(file.path(params$resultsdir, "02_phosphodata.rds"))
-
-```
-
-
-```{r Data}
 
 # SIGNOR network
 signor <- read.csv(file.path(params$SIGNOR), sep = "\t", stringsAsFactors = FALSE)
@@ -83,13 +77,6 @@ rownames(phosphodata$lfc) <- ((rownames(phosphodata$lfc) %>% strsplit(split = ";
 rownames(phosphodata$fdr) <- rownames(phosphodata$lfc)
 phosphodata$lfc %<>% rowDemultiplex(sep = ";")
 phosphodata$fdr %<>% rowDemultiplex(sep = ";")
-
-```
-
-
-```{r}
-
-writeTables(list(NES=kinasedata$NES),file = file.path(params$results,"ST2kinases.xlsx"))
 
 ```
 
@@ -133,7 +120,7 @@ Identify subgraphs of perturbed nodes and edges for each perturbation.
 ```{r Subnetwork extraction}
 
 SGL$perturbation.subgraphs <- IG$design$sample %L>% function(tmpsample){
-  
+
   SG <- select(.data = as_tbl_graph(IG), sample == tmpsample) %>%
     activate(nodes) %>% mutate(DE = naf(kinaseFDR <= 0.05), mutated = naf(mutated)) %>%
     activate(edges) %>% mutate(DE = naf(phosphoFDR <= 0.05), weight = phosphoFDR) %>%
@@ -142,7 +129,7 @@ SGL$perturbation.subgraphs <- IG$design$sample %L>% function(tmpsample){
     lcc() %>%
     addLayout(., layout_remove_overlaps(layout = layout_with_stress(.), label_width = 0.13, label_heigth = 0.08))
 
-  return(SG)
+  SG
 }
 
 # adjust layouts
@@ -180,6 +167,7 @@ SGL$crc.graphs <- SGL$crc.graphs %L>% as_tbl_graph() %L>%
 
 
 ```{r CRC unions - plots}
+
 mut_color <- rgb(0.3, 0.3, 0.3)
 title_size <- 19
 axis_textsize <- 14
@@ -197,7 +185,7 @@ SGL$crc.graphs <- SGL$crc.graphs %L>% mutate(labscore = labscore , label = "",
 ggg <- SGL$crc.graphs %L>% ggnet(node_mapping = aes(color = mutation, fill = mutation, shape = mutation),
                                  label_mapping = aes(label = label),
                                  arrow_mapping = aes(angle = EFFECT),
-                                 angle = angle, edge_geom = geom_edge_arc, edge_color = rgb(0.63, 0.63, 0.63), edge_endgap = 1.8,
+                                 angle = angle, edge_geom = geom_edge_arc, edge_colour = rgb(0.63, 0.63, 0.63), edge_endgap = 1.8,
                                  node_labsize = node_label_size/ggplot2::.pt, node_size = 2, strength = 0.1)
 
 ggg %<L>% function(g){ g + scale_color_manual("node type", values = c("mutated" = mut_color, "not mutated" = rgb(0.3, 0.3, 0.3))) +
@@ -207,15 +195,14 @@ ggg %<L>% function(g){ g + scale_color_manual("node type", values = c("mutated" 
                             theme(legend.key.height = unit(1, 'cm'),
                                   legend.key.width = unit(1.5, 'cm'),
                                   plot.background = element_blank(),
-                                  #plot.margin = margin(0, 0, 0, 0, unit = "npc"),
                                   legend.title = element_blank(),
                                   legend.text = element_text(size = legend_text_size)) +
                             guides(shape = guide_legend(override.aes = list(size = 5)))}
 
 gg_net <- lapply(ggg, function(gg){ gg + theme(legend.position = "none", plot.margin = margin(0.1, 0, 0.05, 0, unit = "npc"))})
-gg_net <- plot_grid(plotlist = gg_net, nrow = 2, labels = names(gg_net), label_size = title_size, label_fontface = "plain",
-                    label_x = 0.5, hjust = 0.5)
 
+gg_net <- plot_grid(plotlist = gg_net, nrow = 2, labels = names(gg_net), label_size = title_size, label_fontface = "plain",
+                   label_x = 0.5, hjust = 0.5)
 ggsave(gg_net, filename = file.path(params$figures, "Fig4a.pdf"), device = "pdf", width = 12, height = 8)
 
 ```
@@ -293,24 +280,24 @@ crc.pie.plots <- setNames(names(SGL$pie.crc.graphs), names(SGL$pie.crc.graphs)) 
   graph <- SGL$pie.crc.graphs[[x]]
   n <- ecount(graph)
   
-  gg <- ggnet2(graph = graph,
-                edge_labdist = unit(0, 'npc'), edge_width = 3/n^0.7,
-                arrow_length = 0.7+40/(n^1.2), edge_endgap = 1 + 25/(n^0.6), edge_startgap = 0.1,
-                node_size = 80/sqrt(n^0.6+10),
-                strength = 0.1, node_labsize = 4.9/log(sqrt(n+7)), edge_labsize = 4/log(sqrt(n^1.2+7))*0.4,
-                node_mapping = aes(fill = kinaseNES, pie = piedata),
-               pie_nodesize = 10/sqrt(n^0.6+10),
-                label_mapping = aes(label = label),
-                edge_mapping = aes(linetype = MECHANISM),
-                arrow_mapping = aes(angle = EFFECT), angle = angle) +
+  gg <- ggnet(graph = graph,
+              edge_labdist = unit(0, 'npc'), edge_width = 3/n^0.7,
+              arrow_length = 0.7+40/(n^1.2), edge_endgap = 1 + 25/(n^0.6), edge_startgap = 0.1,
+              node_size = 80/sqrt(n^0.6+10),
+              strength = 0.1, node_labsize = 4.9/log(sqrt(n+7)), edge_labsize = 4/log(sqrt(n^1.2+7))*0.4,
+              node_mapping = aes(fill = kinaseNES, pie = piedata),
+              pie_nodesize = 10/sqrt(n^0.6+10),
+              label_mapping = aes(label = label),
+              edge_mapping = aes(linetype = MECHANISM),
+              arrow_mapping = aes(angle = EFFECT), angle = angle) +
       scale_pie_color +
       scale_edge_color +
       scale_edge_linetype_manual(values = ltys) +
-      scale_size_manual(values = c(large=3,small=0.8))
+      scale_size_manual(values = c(large = 3, small = 0.8))
   
   gg <- gg + ggtitle(label = x)
   
-  return(gg)
+  gg
   }
 
 ggleg <- ggraph_legend(crc.pie.plots[[1]])

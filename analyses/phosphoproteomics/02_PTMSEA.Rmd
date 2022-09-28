@@ -12,7 +12,7 @@ params:
   ssGSEA: ../../lib/ssGSEA2.0
   PTMSEA: ../../lib/PTMSEA.R
   PTMSEAgmt.uniprot:  ../../lib/ssGSEA2.0/db/ptmsigdb/ptm.sig.db.all.uniprot.human.v1.9.0.gmt
-  sgecores: 52
+  sgecores: 50
 ---
 
 
@@ -21,22 +21,14 @@ params:
 library(conflicted)
 library(ggplot2)
 library(igraph)
-library(tidygraph)
-library(ggraph)
 library(reshape2)
 library(cmapR)
 library(ComplexHeatmap)
-library(R.utils)
-library(ggvenn)
 library(patchwork)
 library(circlize)
 library(dplyr)
 library(magrittr)
-library(dendsort)
 library(cowplot)
-library(BiocParallel)
-library(graphlayouts)
-library(pacman)
 library(matrixStats)
 
 if (!dir.exists(params$resultsdir)){ dir.create(params$resultsdir) }
@@ -59,12 +51,8 @@ phosphodata <- readRDS(file.path(params$resultsdir, "01_phosphodata.rds"))
 ```
 
 
-
-### PTM-SEA ----
-
-
-
-```{bash PTM-SEA, engine.opts = '-l'}
+Get ssGSEA/PTMSEA from github
+```{bash PTM-SEA setup, engine.opts = '-l'}
 
 ptmseaR=$(readlink -f $PTMSEA)
 ssgsea=$(readlink -f $ssGSEA)
@@ -74,7 +62,6 @@ if [ ! -d $ssGSEA ]; then
 fi
 
 ```
-
 
 
 ```{r PTM-SEA preprocessing: Phosphodata input scores}
@@ -116,7 +103,6 @@ names(ptmsigdb_measured) <- paste0(names(ptmsigdb_measured), " (PTMSigDB)")
 ptmsigdb_measured <- collapseSets(ptmsigdb_measured, i = "entry")
 
 ```
-
 
 
 ```{r PTM-SEA preprocessing: PTM-sets from SIGNOR}
@@ -162,18 +148,18 @@ write_gmt(combined_sets, fname = file.path(params$resultsdir, "PTMSEA", "ptmsets
 ```
 
 
-```{r PTM-SEA preprocessing: Compare SIGNOR and PTMSigDB}
+```{r PTM-SEA preprocessing: Compare SIGNOR and PTMSigDB, include=FALSE}
 
 # all signatures
 SIGNOR_sites <- sapply(ptmsets, "[[", "entry") %>% unlist() %>% sub("[;u]+$|[;d]+$", "", .) %>% unique()
 ptmsigdb_sites <- ptmsigdb_all %>% sapply(., "[[", "entry") %>% unlist() %>% sub("[;u]+$|[;d]+$", "", .) %>% unique()
 
-gg1 <- ggvenn::ggvenn(list(SIGNOR = SIGNOR_sites, PTMsigdb = ptmsigdb_sites), stroke_color = NA, fill_color = c(rgb(0.3,0.4,1), rgb(1,0.95,0))) + 
+gg1 <- ggvenn::ggvenn(list(SIGNOR = SIGNOR_sites, PTMsigdb = ptmsigdb_sites), stroke_color = NA, fill_color = c(rgb(0.3,0.4,1), rgb(1,0.95,0))) +
   theme(plot.title = element_text(hjust=0.5)) +
   ggtitle("phosphosites (all signatures)")
 
 gg2 <- ggvenn::ggvenn(list(SIGNOR = SIGNOR_sites, PTMsigdb = ptmsigdb_sites, measured = rownames(scores)), stroke_color = NA,
-               fill_color = c(rgb(0.3,0.4,1), rgb(1,0.95,0), rgb(0.2,1,0.3))) + 
+               fill_color = c(rgb(0.3,0.4,1), rgb(1,0.95,0), rgb(0.2,1,0.3))) +
   theme(plot.title = element_text(hjust=0.5)) +
   ggtitle("phosphosites (all signatures)")
 
@@ -181,12 +167,12 @@ gg2 <- ggvenn::ggvenn(list(SIGNOR = SIGNOR_sites, PTMsigdb = ptmsigdb_sites, mea
 SIGNOR_sites <- sapply(ptmsets, "[[", "entry") %>% unlist() %>% sub("[;u]+$|[;d]+$", "", .) %>% unique()
 ptmsigdb_sites <- ptmsigdb_kinases %>% sapply(., "[[", "entry") %>% unlist() %>% sub("[;u]+$|[;d]+$", "", .) %>% unique()
 
-gg3 <- ggvenn::ggvenn(list(SIGNOR = SIGNOR_sites, PTMsigdb = ptmsigdb_sites), stroke_color = NA, fill_color = c(rgb(0.3,0.4,1), rgb(1,0.95,0))) + 
+gg3 <- ggvenn::ggvenn(list(SIGNOR = SIGNOR_sites, PTMsigdb = ptmsigdb_sites), stroke_color = NA, fill_color = c(rgb(0.3,0.4,1), rgb(1,0.95,0))) +
   theme(plot.title = element_text(hjust=0.5)) +
   ggtitle("phosphosites (kinase signatures)")
 
 gg4 <- ggvenn::ggvenn(list(SIGNOR = SIGNOR_sites, PTMsigdb = ptmsigdb_sites, measured = rownames(scores)), stroke_color = NA,
-               fill_color = c(rgb(0.3,0.4,1), rgb(1,0.95,0), rgb(0.2,1,0.3))) + 
+               fill_color = c(rgb(0.3,0.4,1), rgb(1,0.95,0), rgb(0.2,1,0.3))) +
   theme(plot.title = element_text(hjust=0.5)) +
   ggtitle("phosphosites (kinase signatures)")
 
@@ -197,10 +183,8 @@ ggptm
 ```
 
 
-
-
 Run PTM-SEA for pval-scored input data
-```{bash PTM-SEA, engine.opts = '-l'}
+```{bash PTM-SEA on HPC, engine.opts = '-l'}
 
 ptmseaR=$(readlink -f $PTMSEA)
 ssgsea=$(readlink -f $ssGSEA)
@@ -222,20 +206,21 @@ qsub -pe smp $sgecores $ptmseaR \
   --export TRUE \
   --globalfdr TRUE \
   --sparecores $(($(nproc --all)-sgecores))
-
+ 
 while qstat | grep -q -w PTMSEA; do
   sleep 3
 done
 
 ```
 
+
 ```{bash PTM-SEA local, engine.opts = '-l'}
 
 # ptmseaR=$(readlink -f $PTMSEA)
 # ssgsea=$(readlink -f $ssGSEA)
-
+# 
 # cd $resultsdir/PTMSEA
-
+# 
 # Rscript $ptmseaR \
 #   --script $ssgsea \
 #   --input input_uniprot.gct \
@@ -250,7 +235,7 @@ done
 #   --minoverlap 2 \
 #   --export TRUE \
 #   --globalfdr TRUE \
-#   --sparecores $(($(nproc --all)-sgecores))
+#   --sparecores 8
 
 ```
 
@@ -276,6 +261,7 @@ used_sites <- sapply(siglist, function(tmplist){
 })
 
 PTMSEAresults$signatures <- data.frame(row.names = names(used_sites), "signatures" = names(used_sites), "sites" = used_sites)
+
 writeTables(PTMSEAresults, file.path(params$resultsdir, "PTMSEA", "PTMSEA_results.xlsx"), rownames = c(T,T,T,F))
 saveRDS(object = PTMSEAresults, file = file.path(params$resultsdir, "PTMSEA", "PTMSEAresults.rds"), compress = "gzip")
 
@@ -283,12 +269,21 @@ saveRDS(object = PTMSEAresults, file = file.path(params$resultsdir, "PTMSEA", "P
 
 ```{r PTM-SEA: kinases}
 
+# SIGNOR network
+signor <- read.csv(file.path(params$SIGNOR), sep = "\t", stringsAsFactors = FALSE)
+signor %<>% subset(TAX_ID %in% c(9606, -1)) %>% subset(TYPEA == "protein" & TYPEB == "protein") %>% signor2net()
+signor %<>% mutate(EFFECT = gsub("binding", "unknown", EFFECT))
+
 # Mutations
 mutationdata <- importMutationdata(file.path(params$data, "exomeseq", "SomaticVariant_summarytable_allVars.tsv"))
 
 res <- PTMSEAresults %>% ptmsigdb2kinase(ids = base::union(signor$ENTITYA, signor$ENTITYB))
 res <- res %L>% function(tmp){ tmp[res$kinases$n > 5 & rowAnys(res$FDR <= 0.01, na.rm = TRUE), ] }
 kinasedata <- res %>% magrittr::extract(c("NES", "FDR")) %L>% rowDemultiplex()
+
+gmt <- parse_gmt(file.path(params$resultsdir, "PTMSEA", "ptmsets_combined.gmt"))
+(gmt[res$kinases$orig] %L>% function(x){x$entry} ) %>% unlist() %>% unname() %>%
+  gsub(pattern = "-p;.*", replacement = "") %>% unique() %>% length()
 
 pval_mat <- kinasedata$FDR
 pval_mat[is.na(pval_mat)] <- 1
@@ -339,8 +334,6 @@ pdf(file = file.path(params$figures, "Fig3c.pdf"), onefile = TRUE, width = 12, h
 dev.off()
 
 ```
-
-
 
 
 ```{r PTM-SEA: pathways}
@@ -394,18 +387,10 @@ pdf(file = file.path(params$figures, "Fig3d.pdf"), width = 12, height = 7, bg = 
   ComplexHeatmap::draw(h_crc2, annotation_legend_list  = list(lgd))
 dev.off()
 
-
 ```
 
 
-
-
 ```{r Volcano plots}
-
-# SIGNOR network
-signor <- read.csv(file.path(params$SIGNOR), sep = "\t", stringsAsFactors = FALSE)
-signor %<>% subset(TAX_ID %in% c(9606, -1)) %>% subset(TYPEA == "protein" & TYPEB == "protein") %>% signor2net()
-signor %<>% mutate(EFFECT = gsub("binding", "unknown", EFFECT))
 
 kinasedata <- PTMSEAresults %>%
   ptmsigdb2kinase(ids = base::union(signor$ENTITYA, signor$ENTITYB)) %>%
@@ -446,6 +431,14 @@ ggsave(gg, filename = file.path(params$figures, "SuppFig2d.pdf"), device = "pdf"
 ```{r}
 
 write.csv(kinasedata$NES, file = file.path(params$resultsdir, "PTMSEA", "NES_table.csv"))
+
+df1 <- as.data.frame(kinasedata$NES) %>% tibble::rownames_to_column(var = "kinase") %>%
+  tidyr::pivot_longer(cols = -kinase, names_to = "sample", values_to = "NES")
+df2 <- as.data.frame(kinasedata$FDR) %>% tibble::rownames_to_column(var = "kinase") %>%
+  tidyr::pivot_longer(cols = -kinase, names_to = "sample", values_to = "FDR")
+
+df <- full_join(df1, df2) %>% arrange(sample, kinase) %>% subset(!is.na(NES))
+write.csv(df, file = file.path(params$resultsdir, "Kinase_NES_table.csv"), quote = F, row.names = F)
 
 ```
 

@@ -1605,13 +1605,13 @@ importMutationdata <- function(mutfile, coding = TRUE){
                      "stop_lost",#
                      "coding_sequence_variant")
     
-    mutres <- mutres %L>% function(M){
+    mutres <- lapply(mutres, function(M){
       x <- strsplit(names(M), split = ",|&")
-      y <- x %S>% function(xx){ unique(xx[xx %in% filter_vars]) }
-      z <- y %S>% paste(collapse = ",")
+      y <- sapply(x, function(xx){ unique(xx[xx %in% filter_vars]) })
+      z <- sapply(y, paste, collapse = ",")
       names(M) <- z
       M[nchar(z) > 0]
-    }
+    })
   }
   
   
@@ -2300,222 +2300,9 @@ unionNet <- function(subgraphs, graph, by = NULL){
 ### NETWORK VISUALIZATION ------------------------------------------------------
 
 
-
-ggnet <- function(graph, layout = NULL, node_mapping = aes(), label_mapping = aes(label = name), edge_mapping = aes(), arrow_mapping = aes(), edge_geom = geom_edge_arc,
-                  node_color = NULL, node_size = NULL, node_labsize = NULL, arrow_length = NULL,
-                  edge_color = NULL, edge_labsize = NULL, edge_width = NULL, edge_endgap = NULL, edge_startgap = NULL, edge_labdist = NULL, ...){
-  
-  ### Function to plot igraph/tidygraph objects with different line or arrow types or with pie charts as nodes.
-  
-  ## Functions ----
-  update_aes <- function(mapping, ...) {
-    ggplot2:::rename_aes(modifyList(mapping, ...))  
-  }
-  
-  get_edges2 <- function (format = "short", collapse = "none", ix, ...) 
-  {
-    if (!collapse %in% c("none", "all", "direction")) {
-      stop("Collapse must be either \"none\", \"all\" or \"direction\"")
-    }
-    
-    function(layout) {
-      
-      edges <- ggraph:::collect_edges.layout_tbl_graph(layout)
-      
-      edges <- switch(collapse, none = edges, all = ggraph:::collapse_all_edges(edges), 
-                      direction = ggraph:::collapse_dir_edges(edges))
-      edges <- switch(format, short = ggraph:::format_short_edges(edges, 
-                                                                  layout), long = ggraph:::format_long_edges(edges, layout), 
-                      stop("Unknown format. Use either \"short\" or \"long\""))
-      edges <- do.call(cbind, c(list(edges), lapply(list(...), 
-                                                    rep, length.out = nrow(edges)), list(stringsAsFactors = FALSE)))
-      attr(edges, "type_ggraph") <- "edge_ggraph"
-      subset(edges, ix)
-      
-    }
-  }
-  
-  
-  ## Input data  ----
-  edf <- igraph::as_data_frame(graph)
-  E(graph)$fromto <- paste0(edf$from, "_", edf$to)
-  graph <- as_tbl_graph(graph)
-  graph %<>% activate(edges) %>% mutate(multi = E(graph)$fromto %in% E(graph)$fromto[duplicated(E(graph)$fromto)])
-  args <- list(...)
-  
-  
-  # set sizes and colors
-  if (!is.null(node_mapping[["size"]])){
-    node_size <- node_mapping[["size"]]
-  }
-  if (is.null(node_size)) node_size <- 40/sqrt(vcount(graph)+5)
-  if (is.null(node_labsize)) node_labsize <- 5/log(sqrt(vcount(graph)+5))
-  if (is.null(edge_startgap)) edge_startgap <- 0
-  if (is.null(edge_endgap)) edge_endgap <- 2 + 25/(vcount(graph)) #3 + (node_size)/5
-  if (is.null(edge_labsize)) edge_labsize <- node_labsize * 0.4
-  if (is.null(edge_labdist)) edge_labdist <- unit(0.1/sqrt(ecount(graph)+2), 'npc')
-  if (is.null(arrow_length)) arrow_length <- 1 + 10/(vcount(graph)) # 10/sqrt(ecount(graph)+2)
-  if (is.null(edge_width)) edge_width <- 1/log(sqrt(ecount(graph)+2))
-  if (is.null(edge_color) & is.null(edge_mapping[["colour"]])) edge_color <- rgb(0.4, 0.4, 0.4)
-  if (is.null(node_color) & is.null(node_mapping[["colour"]])) node_color <- rgb(0.6, 0.6, 0.6)
-  
-  
-  
-  # layout
-  if (is.null(layout)) layout <- cbind(x = V(graph)$x, y = V(graph)$y)
-  if (is.null(layout)){
-    layout <- layout_with_stress(graph)
-  }
-  if (!is.null(layout)) dimnames(layout) <- list(V(graph)$name, c("x", "y"))
-  
-  if ("x" %in% vertex_attr_names(graph)) graph <- graph %N>% dplyr::select(-c(x, y))
-  
-  
-  ## Ggraph ----
-  gg <- ggraph(graph, layout = layout) + 
-    theme_graph(base_family = "sans") + 
-    theme(text = element_text(family = "sans"), plot.title = element_text(hjust=0.5))
-  
-  
-  ## Edges ----
-  
-  # edges
-  edge_params <- args[["edges"]]
-  if (is.null(edge_params)){
-    
-    edge_params <- list(start_cap = circle(edge_startgap/100, 'npc'),
-                        end_cap = circle(edge_endgap/100, 'npc'),
-                        angle_calc = "along",
-                        label_dodge = edge_labdist,
-                        label_size = edge_labsize,
-                        label_colour = rgb(0.3, 0.3, 0.3))
-    edge_params$colour <- edge_color
-  }
-  
-  edge_params2 <- edge_params
-  edge_params2$end_cap <- circle(edge_endgap/100 * 1.5, 'npc')
-  
-  
-  
-  # arrows
-  length_attr <- arrow_length
-  type_attr <- "open"
-  ends_attr <- "last"
-  angle_attr <- 60
-  
-  if (!is.null(arrow_mapping[["length"]])) length_attr <- as.numeric(rlang::as_name(arrow_mapping[["length"]]))
-  if (!is.null(arrow_mapping[["type"]])) type_attr <- rlang::as_name(arrow_mapping[["type"]])
-  if (!is.null(arrow_mapping[["ends"]])) ends_attr <- rlang::as_name(arrow_mapping[["ends"]])
-  if (!is.null(arrow_mapping[["angle"]])) angle_attr <- arrow_mapping[["angle"]]
-  
-  
-  if (!is.null(arrow_mapping[["angle"]])){
-    
-    angle_params <- args[["angle"]]
-    if (!rlang::as_name(angle_attr) %in% edge_attr_names(graph)) stop("Please add ", rlang::as_name(angle_attr), " as edge attribute to graph!")
-    all_angle_attrs <- graph %E>% pull(!!angle_attr) %>% unique()
-    
-    if (is.null(angle_params) | !all(all_angle_attrs %in% names(angle_params))) angle_params <- all_angle_attrs %>% setNames((1:length(.)) * 90/length(.), .)
-    
-    arrows <- lapply(setNames(names(angle_params), names(angle_params)), function(tmp){
-      arrow(length = unit(length_attr/100, 'npc'),
-            angle = angle_params[tmp],
-            ends = ends_attr,
-            type = type_attr)
-    })
-  } else {
-    all_angle_attrs <- "default"
-    arrows <- list("default" = arrow(length = unit(length_attr/100, 'npc'),
-                                     angle = angle_attr,
-                                     ends = ends_attr,
-                                     type = type_attr))
-  }
-  
-  args <- args[!names(args) %in% c("edges", "angle")]
-  
-  # draw edges
-  for (aattr in all_angle_attrs){
-    
-    # draw solid arrows
-    if (length(all_angle_attrs) == 1) aes_tmp <- update_aes(edge_mapping, aes(linetype = NULL))
-    if (length(all_angle_attrs) > 1) aes_tmp <- update_aes(edge_mapping, aes(filter = !!angle_attr == !!aattr, linetype = NULL))
-    gg <- gg + do.call(edge_geom, args = c("data" = get_edges2(ix = !E(graph)$multi), "mapping" = list(aes_tmp), "arrow" = list(arrows[[aattr]]), width = edge_width, linetype = "solid", args, edge_params))
-    gg <- gg + do.call(geom_edge_fan, args = c("data" = get_edges2(ix = E(graph)$multi), "mapping" = list(aes_tmp), "arrow" = list(arrows[[aattr]]), strength = 1, width = edge_width, linetype = "solid", args[names(args) != "strength"], edge_params)) #
-    gg <- gg + do.call(geom_edge_loop, args = c("mapping" = list(aes_tmp), "arrow" = list(arrows[[aattr]]), width = edge_width, linetype = "solid", edge_params))
-    
-    # overlay solid lines with (shorter) white line
-    if (length(all_angle_attrs) == 1) aes_tmp <- update_aes(edge_mapping, aes(linetype = NULL))
-    if (length(all_angle_attrs) > 1) aes_tmp <- update_aes(edge_mapping, aes(filter = !!angle_attr == !!aattr, linetype = NULL))
-    gg <- gg + do.call(edge_geom, args = c("data" = get_edges2(ix = !E(graph)$multi), "mapping" = list(aes_tmp), linetype = "solid", width = edge_width * 1.09, color = "white", args, edge_params2)) 
-    gg <- gg + do.call(geom_edge_fan, args = c("data" = get_edges2(ix = E(graph)$multi), "mapping" = list(aes_tmp), strength = 1, linetype = "solid", width = edge_width * 1.09, color = "white", args[names(args) != "strength"], edge_params2)) 
-    gg <- gg + do.call(geom_edge_loop, args = c("mapping" = list(aes_tmp), linetype = "solid", width = edge_width * 1.09, color = "white", edge_params2))
-    
-    # draw edges of line-type line without arrow
-    if (length(all_angle_attrs) == 1) aes_tmp <- edge_mapping
-    if (length(all_angle_attrs) > 1) aes_tmp <- update_aes(edge_mapping, aes(filter = !!angle_attr == !!aattr))
-    gg <- gg + do.call(edge_geom, args = c("data" = get_edges2(ix = !E(graph)$multi), "mapping" = list(aes_tmp), width = edge_width, args, edge_params2))
-    gg <- gg + do.call(geom_edge_fan, args = c("data" = get_edges2(ix = E(graph)$multi), "mapping" = list(aes_tmp), width = edge_width, strength = 1, args[names(args) != "strength"], edge_params2))
-    gg <- gg + do.call(geom_edge_loop, args = c("mapping" = list(aes_tmp), width = edge_width, edge_params2))
-  }
-  
-  
-  ## Nodes ----
-  
-  if ("pie" %in% names(node_mapping)){
-    
-    # if (!is.null(node_mapping[["size"]])) node_size <- node_mapping[["size"]] else node_size <- 0.15
-    node_size <- node_size/60
-    node_mapping <- update_aes(node_mapping, aes(x = x, y = y))
-    pie_attr <- node_mapping[["pie"]]
-    col_attr <- node_mapping[["fill"]]
-    node_mapping <- update_aes(node_mapping, aes(pie = NULL))
-    piedata <- graph %N>% pull(!!pie_attr)
-    piedata <- t(sapply(piedata, function(tmp) tmp ))
-    rownames(piedata) <- graph %N>% pull(name)
-    
-    pies <- reshape2::melt(data.matrix(piedata), varnames = c("node", "column"),  value.name = rlang::as_name(col_attr))
-    pies$node <- as.character(pies$node)
-    pies$column <- as.character(pies$column)
-    pies$value <- 1
-    pies <- cbind(pies, layout[match(pies$node, rownames(layout)),]) # adds x, y
-    
-    gg <- gg + scatterpie::geom_scatterpie(mapping = node_mapping,
-                                           color = NA,
-                                           cols = "column",
-                                           legend_name = "pie",
-                                           data = pies,
-                                           pie_scale = ncol(piedata),
-                                           long_format = T)
-    
-    # edit the last layer to replace the default scatterpie scale
-    node_mapping <- update_aes(node_mapping, aes(x = NULL, y = NULL, x0 = x, y0 = y, r0 = 0, r = node_size, amount = 1))
-    gg$layers[[length(gg$layers)]]$mapping <- node_mapping
-    
-    gg <- gg + coord_equal(clip = "off")
-    
-  } else {
-    
-    node_args <- list("mapping" = node_mapping, "size" = node_size)
-    node_args$colour <- node_color
-    gg <- gg + do.call(geom_node_point, args = node_args)
-    
-    gg <- gg + coord_cartesian(clip = "off")
-  }
-  
-  
-  gg <- gg + geom_node_text(mapping = label_mapping, size = node_labsize)
-  
-  
-  
-  return(gg)
-}
-
-
-
-
-ggnet2 <- function(graph, layout = NULL, node_mapping = aes(), label_mapping = aes(label = name), edge_mapping = aes(), arrow_mapping = aes(), edge_geom = geom_edge_arc,
+ggnet <- function(graph, layout = NULL, node_mapping = aes(), label_mapping = aes(label = name), edge_mapping = aes(), arrow_mapping = aes(), edge_geom = ggraph::geom_edge_arc,
                    node_color = NULL, node_size = NULL, node_labsize = NULL, arrow_length = NULL,pie_nodesize=2,
-                   edge_color = NULL, edge_labsize = NULL, edge_width = NULL, edge_endgap = NULL, edge_startgap = NULL, edge_labdist = NULL, ...){
+                   edge_colour = NULL, edge_labsize = NULL, edge_width = NULL, edge_endgap = NULL, edge_startgap = NULL, edge_labdist = NULL, ...){
   
   ### Function to plot igraph/tidygraph objects with different line or arrow types or with pie charts as nodes.
   
@@ -2568,7 +2355,7 @@ ggnet2 <- function(graph, layout = NULL, node_mapping = aes(), label_mapping = a
   if (is.null(edge_labdist)) edge_labdist <- unit(0.1/sqrt(ecount(graph)+2), 'npc')
   if (is.null(arrow_length)) arrow_length <- 1 + 10/(vcount(graph)) # 10/sqrt(ecount(graph)+2)
   if (is.null(edge_width)) edge_width <- 1/log(sqrt(ecount(graph)+2))
-  if (is.null(edge_color) & is.null(edge_mapping[["colour"]])) edge_color <- rgb(0.4, 0.4, 0.4)
+  if (is.null(edge_colour) & is.null(edge_mapping[["colour"]])) edge_colour <- rgb(0.4, 0.4, 0.4)
   if (is.null(node_color) & is.null(node_mapping[["colour"]])) node_color <- rgb(0.6, 0.6, 0.6)
   
   
@@ -2601,7 +2388,7 @@ ggnet2 <- function(graph, layout = NULL, node_mapping = aes(), label_mapping = a
                         label_dodge = edge_labdist,
                         label_size = edge_labsize,
                         label_colour = rgb(0.3, 0.3, 0.3))
-    edge_params$colour <- edge_color
+    edge_params$colour <- edge_colour
   }
   
   edge_params2 <- edge_params
@@ -2652,22 +2439,22 @@ ggnet2 <- function(graph, layout = NULL, node_mapping = aes(), label_mapping = a
     if (length(all_angle_attrs) == 1) aes_tmp <- update_aes(edge_mapping, aes(linetype = NULL))
     if (length(all_angle_attrs) > 1) aes_tmp <- update_aes(edge_mapping, aes(filter = !!angle_attr == !!aattr, linetype = NULL))
     gg <- gg + do.call(edge_geom, args = c("data" = get_edges2(ix = !E(graph)$multi), "mapping" = list(aes_tmp), "arrow" = list(arrows[[aattr]]), width = edge_width, linetype = "solid", args, edge_params))
-    gg <- gg + do.call(geom_edge_fan, args = c("data" = get_edges2(ix = E(graph)$multi), "mapping" = list(aes_tmp), "arrow" = list(arrows[[aattr]]), strength = 1, width = edge_width, linetype = "solid", args[names(args) != "strength"], edge_params)) #
-    gg <- gg + do.call(geom_edge_loop, args = c("mapping" = list(aes_tmp), "arrow" = list(arrows[[aattr]]), width = edge_width, linetype = "solid", edge_params))
+    gg <- gg + do.call(ggraph::geom_edge_fan, args = c("data" = get_edges2(ix = E(graph)$multi), "mapping" = list(aes_tmp), "arrow" = list(arrows[[aattr]]), strength = 1, width = edge_width, linetype = "solid", args[names(args) != "strength"], edge_params)) #
+    gg <- gg + do.call(ggraph::geom_edge_loop, args = c("mapping" = list(aes_tmp), "arrow" = list(arrows[[aattr]]), width = edge_width, linetype = "solid", edge_params))
     
     # overlay solid lines with (shorter) white line
     if (length(all_angle_attrs) == 1) aes_tmp <- update_aes(edge_mapping, aes(linetype = NULL))
     if (length(all_angle_attrs) > 1) aes_tmp <- update_aes(edge_mapping, aes(filter = !!angle_attr == !!aattr, linetype = NULL))
     gg <- gg + do.call(edge_geom, args = c("data" = get_edges2(ix = !E(graph)$multi), "mapping" = list(aes_tmp), linetype = "solid", width = edge_width * 1.09, color = "white", args, edge_params2)) 
-    gg <- gg + do.call(geom_edge_fan, args = c("data" = get_edges2(ix = E(graph)$multi), "mapping" = list(aes_tmp), strength = 1, linetype = "solid", width = edge_width * 1.09, color = "white", args[names(args) != "strength"], edge_params2)) 
-    gg <- gg + do.call(geom_edge_loop, args = c("mapping" = list(aes_tmp), linetype = "solid", width = edge_width * 1.09, color = "white", edge_params2))
+    gg <- gg + do.call(ggraph::geom_edge_fan, args = c("data" = get_edges2(ix = E(graph)$multi), "mapping" = list(aes_tmp), strength = 1, linetype = "solid", width = edge_width * 1.09, color = "white", args[names(args) != "strength"], edge_params2)) 
+    gg <- gg + do.call(ggraph::geom_edge_loop, args = c("mapping" = list(aes_tmp), linetype = "solid", width = edge_width * 1.09, color = "white", edge_params2))
     
     # draw edges of line-type line without arrow
     if (length(all_angle_attrs) == 1) aes_tmp <- edge_mapping
     if (length(all_angle_attrs) > 1) aes_tmp <- update_aes(edge_mapping, aes(filter = !!angle_attr == !!aattr))
     gg <- gg + do.call(edge_geom, args = c("data" = get_edges2(ix = !E(graph)$multi), "mapping" = list(aes_tmp), width = edge_width, args, edge_params2))
-    gg <- gg + do.call(geom_edge_fan, args = c("data" = get_edges2(ix = E(graph)$multi), "mapping" = list(aes_tmp), width = edge_width, strength = 1, args[names(args) != "strength"], edge_params2))
-    gg <- gg + do.call(geom_edge_loop, args = c("mapping" = list(aes_tmp), width = edge_width, edge_params2))
+    gg <- gg + do.call(ggraph::geom_edge_fan, args = c("data" = get_edges2(ix = E(graph)$multi), "mapping" = list(aes_tmp), width = edge_width, strength = 1, args[names(args) != "strength"], edge_params2))
+    gg <- gg + do.call(ggraph::geom_edge_loop, args = c("mapping" = list(aes_tmp), width = edge_width, edge_params2))
   }
   
   
@@ -2717,13 +2504,13 @@ ggnet2 <- function(graph, layout = NULL, node_mapping = aes(), label_mapping = a
     
     node_args <- list("mapping" = node_mapping, "size" = node_size)
     node_args$colour <- node_color
-    gg <- gg + do.call(geom_node_point, args = node_args)
+    gg <- gg + do.call(ggraph::geom_node_point, args = node_args)
     
     gg <- gg + coord_cartesian(clip = "off")
   }
   
   
-  gg <- gg + geom_node_text(mapping = label_mapping, size = node_labsize)
+  gg <- gg + ggraph::geom_node_text(mapping = label_mapping, size = node_labsize)
   
   
   
