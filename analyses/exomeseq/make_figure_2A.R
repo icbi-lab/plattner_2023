@@ -20,6 +20,7 @@ library(stringi)
 library(conflicted)
 conflict_prefer("get_legend", "cowplot")
 conflict_prefer("filter", "dplyr")
+conflict_prefer("rename", "dplyr")
 
 
 ##########
