@@ -8,10 +8,14 @@ colors <- list()
 colors$organoid <- as.character(paletteer::paletteer_d("ggthemes::Tableau_20", n = 16))
 colors$treatment <- as.character(paletteer::paletteer_d("RColorBrewer::Dark2", n = 8))
 colors$msi_status <- c("#9370DB","#FF7F24")
+colors$iCMS <- c("palegreen1", "chocolate4")
+colors$CMS <- c("darkgoldenrod1", "royalblue", "violetred3", "springgreen4")
 
 names(colors$organoid) <- c("CRC01", "CRC02", "CRC03", "CRC04", "CRC11", "CRC12", "CRC13", "CRC15", "CRC17", "CRC18", "CRC19", "CRC20", "CRC21", "CRC22", "CRC26", "CRC26LM")
 names(colors$treatment) <- c("control", "BRAFi", "MEKi", "mTORi", "PI3Ki", "TAKi", "TBKi", "TNFalpha")
 names(colors$msi_status) <- c("MSI", "MSS")
+names(colors$iCMS) <- c("iCMS2", "iCMS3")
+names(colors$CMS) <- c("CMS1", "CMS2", "CMS3", "CMS4")
 colors$treatment['TNFa'] <- colors$treatment[['TNFalpha']]
 
 

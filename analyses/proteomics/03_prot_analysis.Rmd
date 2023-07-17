@@ -69,6 +69,8 @@ exclude_proteins <- function(prot, genes = FALSE) {
 ### Load files:
 1. analysis output for all organoids (with and without imputation) including intensity values for all replicates
 2. clinical sample annotation
+3. CMS/iCMS prediction from previous analysis
+4. mutation table from whole exome sequencing analysis
 
 ```{r}
 ##1
@@ -82,6 +84,12 @@ prot.wImp <- read_tsv(file.prot.wImp)
 
 ##2
 clinical <- read_tsv(file.path(params$inputdir_clinical, "clinical_data_organoids.tsv"))
+
+##3
+cms <- read_tsv("../../tables/CMS_iCMS.tsv")
+
+##4
+mut <- read_tsv(file.path(params$inputdir_clinical, "/exomeseq/SomaticVariant_summarytable_allVars.tsv"))
 ```
 
 
@@ -321,8 +329,37 @@ Get HALLMARK gene sets from migSigDB (version: 7.5.1):
 h <- msigdbr(species = "Homo sapiens", category = "H") |> dplyr::select(gene_symbol, gs_name) |> unstack()
 ``` 
 
+
+Get mutations and filter for coding variants in TP53 and MAPK:
+```{r}
+# Split coding variants in single entries:
+mut <- mut |>
+ separate_longer_delim(variant_type, delim="&")
+
+coding_variants = c(
+    "stop_gained",
+    "frameshift_variant",
+    "stop_lost",
+    "inframe_insertion",
+    "inframe_deletion",
+    "missense_variant",
+    "splice_acceptor_variant",
+    "splice_donor_variant")
+
+mut_coding <- mut |>
+  filter(variant_type %in% coding_variants) |>
+  filter(Gene %in% c("TP53", "MAP2K1", "MAP3K1", "MAP2K4")) |>
+  select(c('PatientID', 'Gene')) |>
+  unique() |>
+  mutate(value=1) |>
+  pivot_wider(names_from="PatientID", values_from=value, values_fill=0) |>
+  column_to_rownames('Gene') |>
+  t() |>
+  data.frame()
+```
+
 Calculate GSVA for all samples and take mean per organoid:
-```{r HALLMARK heatmap}
+```{r HALLMARK heatmap, fig.height=12, fig.width=10}
 gsva_results <- gsva(data.matrix(prot.wImp), h, kcdf = "Gaussian", parallel.sz = params$maxcores)
 
 heatdata = gsva_results |>
@@ -339,13 +376,28 @@ heatdata <- t(scale(t(heatdata)))
 
 top_df <- data.frame(row.names = colnames(heatdata))
 top_df$`MSI status` <- clinical$`MSI / MSS (IHC)`[match(rownames(top_df), clinical$`Organoids code`)]
+top_df$iCMS <- cms$iCMS_prediction[match(rownames(top_df), cms$organoid)]
+top_df$CMS <- cms$CMS_prediction[match(rownames(top_df), cms$organoid)]
+top_df$`TP53 mutation` <- mut_coding$TP53[match(rownames(top_df), rownames(mut_coding))]
+top_df$`MAP2K1 mutation` <- mut_coding$MAP2K1[match(rownames(top_df), rownames(mut_coding))]
+top_df$`MAP3K1 mutation` <- mut_coding$MAP3K1[match(rownames(top_df), rownames(mut_coding))]
+
+# set organoids with no detected mutations in TP53 or MAPK to 0:
+top_df <- top_df |>
+  mutate(`TP53 mutation` = ifelse(is.na(`TP53 mutation`),0, `TP53 mutation`),
+         `MAP2K1 mutation` = ifelse(is.na(`MAP2K1 mutation`), 0, `MAP2K1 mutation`),
+         `MAP3K1 mutation` = ifelse(is.na(`MAP3K1 mutation`), 0, `MAP3K1 mutation`))
 
 colors$`MSI status` <- colors$msi_status
+colors$`TP53 mutation` <- c("1" = "black", "0" = "white")
+colors$`MAP2K1 mutation` <- c("1" = "black", "0" = "white")
+colors$`MAP3K1 mutation` <- c("1" = "black", "0" = "white")
+
 top_annotation <- HeatmapAnnotation(df = top_df,show_annotation_name = T,
                                         name = "MSI status",
                                         gap = unit(0.5, "mm"),
                                         border = FALSE,
-                                        annotation_height = unit(3, "mm"),
+                                        annotation_height = unit(20, "mm"),
                                         annotation_name_gp = gpar(fontsize=12),
                                         simple_anno_size_adjust = TRUE,
                                         annotation_name_side = "right",
@@ -359,21 +411,23 @@ hm <-  Heatmap(matrix = heatdata,
                clustering_distance_columns = "pearson",
                clustering_distance_rows = "pearson",
                heatmap_legend_param = list(title_position = "leftcenter-rot", at = c(-3,-2,-1,0,1,2,3),
-                                           title_gp = gpar(fontsize = 18, fontface = "plain"), labels_gp = gpar(fontsize = 15)),
+                                           title_gp = gpar(fontsize = 12, fontface = "plain"), labels_gp = gpar(fontsize = 12)),
                show_column_dend = TRUE,
-               show_row_dend = TRUE,
+               show_row_dend = FALSE,
                column_names_max_height = unit(0.2, "npc"),
                row_names_max_width = unit(0.45, "npc"),
                show_heatmap_legend = TRUE,
                row_names_gp = gpar(fontsize = 12),
-               column_names_gp = gpar(fontsize = 16),
+               column_names_gp = gpar(fontsize = 12),
                cluster_rows = T,
                cluster_columns = T)
+
+hm
 ```
 
 Export as Figure 2C.
 ```{r, echo = FALSE}
-pdf(file.path(params$paper_figures, "Figure2C.pdf"), width = 13, height = 13, onefile = TRUE)
+pdf(file.path(params$paper_figures, "Figure2C.pdf"), width = 10, height = 12, onefile = TRUE)
 draw(hm, heatmap_legend_side = "left")
 dev.off()
 ```
