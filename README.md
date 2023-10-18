@@ -1,5 +1,5 @@
-# plattner_2022
-Source code to reproduce figures from Plattner et al. (Manuscript submitted)
+# plattner_2023
+Source code to reproduce figures from Plattner et al. *iScience*. 2023
 
 
 ## Obtain the data
