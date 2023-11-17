@@ -1,5 +1,5 @@
 # plattner_2023
-Source code to reproduce figures from Plattner et al. *iScience*. 2023
+Source code to reproduce figures from [Plattner et al. *iScience*. 2023](https://doi.org/10.1016/j.isci.2023.108399)
 
 
 ## Obtain the data

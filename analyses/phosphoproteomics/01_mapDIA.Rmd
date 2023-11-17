@@ -379,36 +379,6 @@ phosphodata$flank.fdr$labels <- NULL
 ```
 
 
-```{r LFC comparison}
-
-# lfcs <- unique(phosphodata$design$CRC) %L>% function(crc){
-#   grep("control", unique(subset(phosphodata$design, CRC == crc)$trtname), value = TRUE, invert = TRUE) %S>% function(trt){
-#     tmpsamples <- rownames(phosphodata$design)[phosphodata$design$trtname == trt]
-#     tmpctrl <- rownames(phosphodata$design)[phosphodata$design$treatment == "control" & phosphodata$design$CRC == crc]
-#     log2( rowMeans(phosphodata$peptidelevels[,tmpsamples, drop = FALSE]) / rowMeans(phosphodata$peptidelevels[,tmpctrl, drop = FALSE]))
-#   }
-# }
-# lfcs <- lfcs %>% Reduce(f = cbind)
-# rownames(lfcs) <- phosphodata$annotation[rownames(lfcs),"psite_name"]
-# 
-# df <- melt(lfcs)
-# df$sample <- factor(df$Var2, levels = sort(unique(df$Var2)))
-# df$ids <- paste0(df$Var1, "_", df$Var2)
-# tmpids <- paste0(phosphodata$DE$psite_name, "_", phosphodata$DE$trt, "_", phosphodata$DE$crc)
-# df$mapdia <- phosphodata$DE$log2FC[match(df$ids, tmpids)]
-# df$FDR_mapdia <- phosphodata$DE$FDR[match(df$ids, tmpids)]
-# 
-# gg <- ggplot(df, aes(x = value, y = mapdia, color = -log10(FDR_mapdia))) +
-#   theme_bw() +
-#   geom_point(size = 0.05) +
-#   scale_color_gradient(low = rgb(0.2,0.2,0.2,0.2), high = rgb(0.9,0,0), na.value = rgb(0,0,0,0.1)) +
-#   facet_wrap(~ sample, scales = "fixed", ncol = 6) + xlab("lfc") + ylab("LFC_mapdia")
-# 
-#  gg
-
-```
-
-
 Volcanoplot
 ```{r Volcanoplot}
 
@@ -505,7 +475,6 @@ heatmap(heatdata,
 
 Target site plots 
 ```{r Treatment target phosphosites}
-
 signor <- read.csv(file.path(params$SIGNOR), sep = "\t", stringsAsFactors = FALSE)
 signor %<>% subset(TAX_ID %in% c(9606, -1)) %>% signor2net() %>%  subset(PSITE != "")
 target_sites <- trt_targets %L>% function(tmp){ sort(unique(signor$PSITE_NAME[signor$from %in% tmp])) }
@@ -523,39 +492,60 @@ measured_sites <- measured_sites[measured_sites %S>% length() > 0]
 phosphodata$DE$crc <- factor(phosphodata$DE$crc)
 phosphodata$DE$DE <- factor(ifelse(phosphodata$DE$FDR <= 0.05, "sig", "not sig"))
 
+
 site_plots <- names(measured_sites) %L>% function(tmp){
   
   plotdata <- subset(phosphodata$DE, psite_name %in% measured_sites[[tmp]] & trt == tmp)
   colnames(plotdata)[colnames(plotdata) == "labels"] <- "phosphosite"
+  plotdata$phosphosite <- sub("_", "-", plotdata$phosphosite)
   
-  ggplot(data = plotdata, aes(x = phosphosite, y = log2FC, color = log2FC, fill = log2FC, shape = DE)) +
-    theme_bw(base_size = 18) + xlab(NULL) +
+  desites <- unique(plotdata$phosphosite[plotdata$DE == "sig"])
+  plotdata <- subset(plotdata, phosphosite %in% desites)
+
+  if (tmp == "TNFalpha") tmp <- "TNFa"
+  
+  gg <- ggplot(data = plotdata, aes(x = phosphosite, y = log2FC, color = log2FC, fill = log2FC, shape = DE)) +
+    theme_bw(base_size = 22) + xlab(NULL) +
     theme(panel.border = element_rect(colour = "black", fill=NA, size=1),
           legend.title = element_blank(),
           legend.margin = margin(0.5, 1, 1, 1),
-          strip.background =  element_rect(colour = NA, fill = rgb(0.85,0.85,0.85), size=1),
-          axis.text.x = element_text(color = rgb(0,0,0), size = 7, angle = 90, hjust = 1, vjust = 0.5,
-                                     margin = margin(t = 0, r = 0, b = 0.02, l = 0, unit = "npc")),
+          strip.background =  element_rect(colour = NA, fill = NA, size=1),
+          axis.title = element_text(size = 22),
+          strip.text = element_text(size = 22),
+          axis.text.x = element_text(color = rgb(0,0,0), 
+                                     angle = 90, hjust = 1, vjust = 0.5, size = 12,
+                                     margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "npc")),
           plot.title = element_text(hjust = 0.5),
-          plot.margin = margin(5, 5, 5, 5, unit = "pt"),
+          plot.margin = margin(2, 2, 8, 0, unit = "pt"),
           legend.position = "right") +
-    geom_segment(aes(xend=phosphosite, y=0, yend=log2FC), size = 1.3) +
+    geom_segment(aes(xend=phosphosite, y=0, yend=log2FC), size = 1.5) +
     geom_hline(yintercept=0, linetype="dashed", color = rgb(0,0,0)) + 
-    geom_point(size = 4, colour="black") +
+    geom_point(size = 4.5, colour="black") +
     scale_shape_manual(values = c("sig" = 23, "not sig" = 21), drop = FALSE) +
-    ggtitle(tmp) + 
-    facet_wrap(. ~ crc, nrow = 1, scales = "free_x", drop = FALSE) + 
-    scale_color_gradient2(low = "#5106b2", mid = rgb(0.94,0.94,0.94), high = "#f2c80e", midpoint = 0) +
-    scale_fill_gradient2(low = "#5106b2", mid = rgb(0.94,0.94,0.94), high = "#f2c80e", midpoint = 0) +
-    ylim(1.2*c(floor(min(plotdata$log2FC)), max(ceiling(plotdata$log2FC), 0.2))) +
-    guides(color = "none", fill = "none")
+    ylab(tmp) +
+    facet_wrap(. ~ crc, nrow = 1, scales = "free_x", drop = FALSE) +
+    
+    scale_color_gradientn(colors = c("#5106b2", rgb(0.94,0.94,0.94), "#f2c80e"), values = scales::rescale(c(-9,0,3)), limits = c(-9, 3), breaks = c(-8, -6, -4, -2, 0, 2)) +
+    scale_fill_gradientn(colors = c("#5106b2", rgb(0.94,0.94,0.94), "#f2c80e"), values = scales::rescale(c(-9,0,3)), limits = c(-9, 3), breaks = c(-8, -6, -4, -2, 0, 2)) +
+
+    ylim(1.2*c(floor(min(plotdata$log2FC)), max(ceiling(plotdata$log2FC), 0.2))) # + guides(color = "none", fill = "none")
+  
+  if (tmp != "MEKi"){
+    gg <- gg + theme(strip.text = element_blank())
+  }
+  
+  gg
 }
 
-site_plot <- plot_grid(plotlist = site_plots, ncol = 1, align = "hv")
-ggsave(path = params$figures, filename = "SuppFig2b.pdf",
-       plot = site_plot, device = "pdf", units = "in", width = 17, height = 18, dpi = 300)
+site_plot <- patchwork::wrap_plots(site_plots, ncol = 1, guides = "collect")
+cowplot::get_legend(site_plot & theme(legend.direction = "horizontal", legend.key.width = unit(1, "in"))) |>
+  ggsave(path = params$figures, filename = "SuppFig3b_legend.pdf", device = "pdf", units = "in", width = 10, height = 5, dpi = 300)
+
+ggsave(path = params$figures, filename = "SuppFig3b.pdf",
+       plot = site_plot & theme(legend.position = "none"), device = "pdf", units = "in", width = 16, height = 18, dpi = 300)
 
 ```
+
 
 
 ```{r Export data, include=FALSE}
